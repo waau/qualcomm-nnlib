@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -149,7 +149,7 @@ static int depthspace_s2d_execute(struct nn_node *self, struct nn_graph *nn)
 		|| bs.blocksize_h != info->block_size.blocksize_h
 		|| bs.blocksize_w != info->block_size.blocksize_w){
 		int res = depthspace_s2d_setup_strategy( self,nn, &bs, elementsize);
-		if( res != 0) return -1;
+		if( res != 0) return errlog(nn, " error in depthspace_s2d_setup_strategy() =%d ",res);
 	}
 
 	// size the tensors

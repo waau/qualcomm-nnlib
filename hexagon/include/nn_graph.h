@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -226,14 +226,20 @@ struct nn_graph {
 	struct nn_prepare_state *pstate;
 	void *vtcm_ptr;			// ptr to VTCM
 	uint32_t vtcm_size;		// size of VTCM
+    uint32_t vtcm_is_real;		// Is it real? Then this will be 1.  Fake or none will have 0
 	struct nn_node **nonconst_head_ptr;	// ptr to head of non-const nodes
 	void *find_node_opaque;
 	void *fake_vtcm_ptr;
+	int num_vector_threads;
+	int total_threads;
+	uint64_t deadline_us;
+
 	// this is the 'or' of all the node->ops->flags values (anded with NN_NODE_FLAGS_SET)
 	// which can be used to skip optimization passes (if no nodes exist of a given class,
 	// the flag for the class will be zero). Only valid during prepare phase.
 	uint32_t op_class_set;
 	int32_t priority;
+	int32_t cpuEarlyWakeup;
 	struct nn_graph_batchseqstate batchseq;
 	struct nn_loopstack loopstack;
 	uint32_t expanded_outputs[NN_MAX_OUTPUTS];
@@ -246,11 +252,11 @@ struct nn_graph {
 	char *enable_const_print_prefix;
 	char *enable_tensor_print_prefix;
 	char *tensor_print_filter;
-
         // udo list
         uint32_t num_udos;
         struct udo_node* udo_list_start;
         struct udo_node* udo_list_end;
+        nn_mutex_t graph_specific_mutex;
 };
 
 // this sets the noderefhash field on a node. Call after changing src_id
@@ -283,7 +289,7 @@ noderefhash_mask( uint32_t node_id ){
 //  You can now let mcman go out of scope, or start with more copies.
 //
 //  The various memcpy/memset operations done before 'wait' may be done in parallel
-//  threads and may be deeply reordered. No more than NN_MEMCPY_MANAGER_MAX_THREADS
+//  threads and may be deeply reordered. No more than nn->num_vector_threads
 //  will be outstanding at any time.
 // Note: the API is not itself thread-safe; the init, copy requests, and wait must
 // all be done in the same thread.
@@ -291,8 +297,7 @@ noderefhash_mask( uint32_t node_id ){
 // regarding nn_mcmanager_vmemset32: the 'value' is 32 bits, but the 'len' is in
 // bytes; and the len can be any number, start pointer any alignment.
 //
-#define NN_MEMCPY_MANAGER_MAX_THREADS 2		// max # of pending ops.
-#define NN_MEMCPY_MANAGER_SLOTS 4			// of slots in struct (>= MAX_THREADS+2)
+#define NN_MEMCPY_MANAGER_SLOTS 6			// of slots in struct (>= MAX_THREADS+2)
 
 // this encodes one of 3 operations:
 //  if src != NULL, rows = 0:
@@ -435,17 +440,17 @@ void print_graph_checksum(struct nn_graph *nn);
 #define LOGBUF_SIZE (1024*512)
 
 #define NN_NODE_FLAG_D32_INPUT (1<<0)
-#define NN_NODE_FLAG_D32_OUTPUT (1<<16)
-#define NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION (1<<17)
+#define NN_NODE_FLAG_D32_OUTPUT (1<<1)
+#define NN_NODE_FLAG_OUTPUT_ACCEPTS_PREPARATION (1<<2)
 //
 // This flag means that the output range will be the same as the input,
 // *and* that you can move a range-limiting op such as Relu from after the op to
 // before, without changing the result (so it e.g. applies to maxpool but not avgpool)
-#define NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE (1<<18)
+#define NN_NODE_FLAG_OUTPUT_USES_INPUT_RANGE (1<<3)
 
 // some flags on certain ops to put them in 'classes'; if there is no
 // op in a given class in the graph we can skip entire passes in prepare.
-//
+// Note that these values can not overlap with the flag values above
 #define NN_NODE_FLAG_CLS_QUANTIZE 		(1u<<31) // Quantize
 #define NN_NODE_FLAG_CLS_REQUANTRANGE 	(1<<30)	 // RequantizationRange_32
 #define NN_NODE_FLAG_CLS_QUANTMUL8TO32  (1<<29)  // QuantizeMul_8x8to32
@@ -459,6 +464,13 @@ void print_graph_checksum(struct nn_graph *nn);
 #define NN_NODE_FLAG_CLS_IMAGETRANSFORM	(1<<21)  //ImageTransform_f
 #define NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE	(1<<20)  //Any loop control node
 #define NN_NODE_FLAG_CLS_DYNAMIC_TENSOR	(1<<19)  //Any nodes with dynamically sized output tensors
+#define NN_NODE_FLAG_CLS_EQLSTM (1<<18) //Any eqLSTM ops
+#define NN_NODE_FLAG_CLS_QDWCONV (1<<17) //QuantizedDepthwiseConv2d_8x8to32
+#define NN_NODE_FLAG_CLS_AXISSHUFF8 (1<<16) //AxisShuffle_8
+#define NN_NODE_FLAG_CLS_TRANSPOSE (1<<15) //Any Tranpose Ops
+#define NN_NODE_FLAG_CLS_REQUANT8 (1<<14) //Requantize_8to8
+#define NN_NODE_FLAG_CLS_QUANTIZEDCAST (1<<13)  //Any occurance of Quantized_CastInt8ToUInt8
+#define NN_NODE_FLAG_CLS_MATMUL_16 (1<<12) //Any occurance of QuantizedMatMul8x8p21to16
 
 // set of all 'classes' flags
 #define NN_NODE_FLAGS_SET\
@@ -467,7 +479,14 @@ void print_graph_checksum(struct nn_graph *nn);
     |NN_NODE_FLAG_CLS_TRANSPOSECONV|NN_NODE_FLAG_CLS_GROUPEDCONV|NN_NODE_FLAG_CLS_DILATEDCONV\
     |NN_NODE_FLAG_CLS_IMAGETRANSFORM\
     |NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE\
-	|NN_NODE_FLAG_CLS_DYNAMIC_TENSOR)
+	|NN_NODE_FLAG_CLS_DYNAMIC_TENSOR\
+	|NN_NODE_FLAG_CLS_EQLSTM\
+	|NN_NODE_FLAG_CLS_QDWCONV\
+	|NN_NODE_FLAG_CLS_AXISSHUFF8\
+	|NN_NODE_FLAG_CLS_TRANSPOSE\
+	|NN_NODE_FLAG_CLS_REQUANT8\
+	|NN_NODE_FLAG_CLS_QUANTIZEDCAST\
+	|NN_NODE_FLAG_CLS_MATMUL_16)
 
 // this defines the allowed range of input or output ports
 // (sub-struct of nn_node_ops)
@@ -561,7 +580,7 @@ int do_populate_const_node(
 
 int do_teardown(struct nn_graph *nn);
 void do_snpprint(struct nn_graph *nn, char *buf, uint32_t length);
-int do_prepare(struct nn_graph *nn);
+int do_prepare(struct nn_graph *nn, int deserialize_flag);
 
 int do_variable_read(
 	struct nn_graph * nn,

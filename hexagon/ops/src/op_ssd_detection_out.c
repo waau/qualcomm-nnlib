@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -360,7 +360,7 @@ static void apply_nms_fast(struct nn_graph *nn, void *nms_info)
     uint8_t score_threshold = info->score_threshold;
     uint8_t min_score = 255;
     struct bbox_record_ref *filtered_indices = info->filtered_indices;
-    unsigned chunk = num_classes / NUM_THREADS;
+    unsigned chunk = max_u32(1, num_classes / NUM_THREADS);
     unsigned thr_id = __sync_fetch_and_add(&info->thr_id, 1);
     struct nn_pqueue *score_pqueue = &info->score_pqueues[thr_id];
     struct nn_pqueue *output_pqueue = &info->output_pqueues[thr_id];

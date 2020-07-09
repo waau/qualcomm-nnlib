@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -455,6 +455,7 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn, int with_hv
 	float out_min = tensor_get_float(min_tensors[0],0);
 	float out_max = tensor_get_float(max_tensors[0],0);
 
+
 	// find the combined range of all inputs...
 	// and record them in the indescs.
 	for (i = 0; i < n_input_tensors; i++) {
@@ -647,8 +648,14 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 	// must be 3*n+1 inputs, where n >= 1
 
 	int n_in = (self->n_inputs - 1) /3;	// actual # of inputs
-	if (n_in < 1 || (self->n_inputs - 1) % 3 !=0 )
-		return errlog(nn,"concat_d32: inputs must be 3*n+1, n>=1");
+	if (n_in < 1 || (self->n_inputs - 1) % 3 != 0 ) {
+		logmsg(nn, 2, "concat: maybe getting output range");
+		if ((self->n_inputs - 1) % 3 != 2) {
+			return errlog(nn,"concat: inputs must be 3*n+1, OR (3*n+1 + 2), n>=1");
+		} else {
+			logmsg(nn, 2, "concat: got an output range");
+		}
+	}
 
 	struct concat_input_descriptor *indescs = nn_calloc(n_in, sizeof(*indescs));
 	if (indescs == NULL) return errlog( nn, "can't allocate input descs");

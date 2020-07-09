@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -88,6 +88,7 @@ struct bilin_runstate {
 	int32_t out_hstride;
 	int32_t factor;
 	int32_t align_corners;
+	int32_t half_pixel_centers;
 	void (*resizebilinear_ptr)(
 		const uint8_t  *in,
 		uint8_t        *out,
@@ -824,17 +825,27 @@ void resizebilinear_general(
 		const uint8_t *bstart = in + b*h_in*w_in*d_in;
 		for (int32_t h = 0; h < h_out; h++) {
 			float yfloat = h*yscale;
+			if (rtsp->half_pixel_centers) {
+				yfloat += 0.5 * (yscale-1);
+			}
 			float yfrac = yfloat - floorf(yfloat);
 			float yint = yfloat - yfrac;
 			for (int32_t w = 0; w < w_out; w++) {
 				float xfloat = w*xscale;
+				if (rtsp->half_pixel_centers) {
+					xfloat += 0.5 * (xscale-1);
+				}
 				float xfrac = xfloat - floorf(xfloat);
 				float xint = xfloat - xfrac;
 				for (int32_t d = 0; d < d_in; d++) {
-					uint8_t f00 = bstart[(int32_t)(min_i32(h_in_end - 1, (yint + 0))*w_in*d_in + min_i32(w_in - 1, (xint + 0))*d_in) + d];
-					uint8_t f01 = bstart[(int32_t)(min_i32(h_in_end - 1, (yint + 0))*w_in*d_in + min_i32(w_in - 1, (xint + 1))*d_in) + d];
-					uint8_t f10 = bstart[(int32_t)(min_i32(h_in_end - 1, (yint + 1))*w_in*d_in + min_i32(w_in - 1, (xint + 0))*d_in) + d];
-					uint8_t f11 = bstart[(int32_t)(min_i32(h_in_end - 1, (yint + 1))*w_in*d_in + min_i32(w_in - 1, (xint + 1))*d_in) + d];
+					int32_t y0 = max_i32(0, min_i32(h_in_end - 1, (yint + 0)));
+					int32_t y1 = max_i32(0, min_i32(h_in_end - 1, (yint + 1)));
+					int32_t x0 = max_i32(0, min_i32(w_in - 1, (xint + 0)));
+					int32_t x1 = max_i32(0, min_i32(w_in - 1, (xint + 1)));
+					uint8_t f00 = bstart[(int32_t)(y0*w_in*d_in + x0*d_in) + d];
+					uint8_t f01 = bstart[(int32_t)(y0*w_in*d_in + x1*d_in) + d];
+					uint8_t f10 = bstart[(int32_t)(y1*w_in*d_in + x0*d_in) + d];
+					uint8_t f11 = bstart[(int32_t)(y1*w_in*d_in + x1*d_in) + d];
 					float outfloat = bilinear_interpolate(f00, f01, f10, f11, xfrac, yfrac);
 					out[d] = outfloat + 0.5f;
 				}
@@ -934,13 +945,17 @@ static int resizebilinear_f_execute(struct nn_node *self, struct nn_graph *nn)
 	uint32_t total_bytes = b_in * h_out*w_out*depth_bytes;
 
 	int32_t align_corners = 0;
-	if (self->n_inputs == 3)
+	if (self->n_inputs >= 3)
 		align_corners = *(int32_t *)(self->inputs[2]->data);
+	int32_t half_pixel_centers = 0;
+	if (self->n_inputs >= 4)
+		half_pixel_centers = *(int32_t *)(self->inputs[3]->data);
 	if (align_corners) {
 		if (w_out <= 1 || h_out <= 1) return errlog(nn, "aligned_corners flag is no good with out width/height of 1 or less");
 		xscale = (float)(w_in-1) / (w_out-1);
 		yscale = (float)(h_in-1) / (h_out-1);
 	}
+	if (align_corners && half_pixel_centers) return errlog(nn, "align_corners flag and half_pixel_centers flag cannot work together");
 
 	if (total_bytes > out_tensor->max_size) return errlog(nn, "out too small");
 	logmsg(nn, 2, "%dx%dx%dx%d --> %dx%dx%dx%d", b_in, h_in, w_in, d_in, b_in, h_out, w_out, d_in);
@@ -951,21 +966,31 @@ static int resizebilinear_f_execute(struct nn_node *self, struct nn_graph *nn)
 		bstart = in + b * h_in*w_in*d_in;
 		for (h = 0; h < h_out; h++) {
 			float yfloat = h * yscale;
+			if (half_pixel_centers) {
+				yfloat += 0.5 * (yscale-1);
+			}
 			float yfrac = yfloat - floorf(yfloat);
 			float yint = yfloat - yfrac;
 			close_h = h * yscale;
 			hstart = bstart + close_h * w_in*d_in;
 			for (w = 0; w < w_out; w++) {
 				float xfloat = w * xscale;
+				if (half_pixel_centers) {
+					xfloat += 0.5 * (xscale-1);
+				}
 				float xfrac = xfloat - floorf(xfloat);
 				float xint = xfloat - xfrac;
 				close_w = w * xscale;
 				wstart = hstart + close_w * d_in;
 				for (d = 0; d < d_in; d++) {
-					float f00 = bstart[(int32_t)(min_i32(h_in - 1, (yint + 0))*w_in*d_in + min_i32(w_in - 1, (xint + 0))*d_in) + d];
-					float f01 = bstart[(int32_t)(min_i32(h_in - 1, (yint + 0))*w_in*d_in + min_i32(w_in - 1, (xint + 1))*d_in) + d];
-					float f10 = bstart[(int32_t)(min_i32(h_in - 1, (yint + 1))*w_in*d_in + min_i32(w_in - 1, (xint + 0))*d_in) + d];
-					float f11 = bstart[(int32_t)(min_i32(h_in - 1, (yint + 1))*w_in*d_in + min_i32(w_in - 1, (xint + 1))*d_in) + d];
+					int32_t y0 = max_i32(0, min_i32(h_in - 1, (yint + 0)));
+					int32_t y1 = max_i32(0, min_i32(h_in - 1, (yint + 1)));
+					int32_t x0 = max_i32(0, min_i32(w_in - 1, (xint + 0)));
+					int32_t x1 = max_i32(0, min_i32(w_in - 1, (xint + 1)));
+					float f00 = bstart[(int32_t)(y0*w_in*d_in + x0*d_in) + d];
+					float f01 = bstart[(int32_t)(y0*w_in*d_in + x1*d_in) + d];
+					float f10 = bstart[(int32_t)(y1*w_in*d_in + x0*d_in) + d];
+					float f11 = bstart[(int32_t)(y1*w_in*d_in + x1*d_in) + d];
 					out[d] = bilinear_interpolate(f00, f01, f10, f11, xfrac, yfrac);
 				}
 				out += d_in;
@@ -987,8 +1012,8 @@ weight_generation(
 	int wid_out = rstp->out_wh;
 	int depth = rstp->depth;
 	int wxd_align = (wid_out*depth + 127) & -128;
-	if (ht_in < 1 || wid_in < 1 || ht_out < 1 || wid_out < 1) return -1;
-	if (depth < 1 || depth > 2) return -1;
+	if (ht_in < 1 || wid_in < 1 || ht_out < 1 || wid_out < 1) return errlog(NULL,"wrong params in weight_generation() ");
+	if (depth < 1 || depth > 2) return errlog(NULL,"wrong params in weight_generation() ");
 
 	struct resizebilinear_plan * planp = (struct resizebilinear_plan *)self->opaque;
 	if (planp != NULL) {
@@ -1005,7 +1030,7 @@ weight_generation(
 	if (planp == NULL) {
 		planp = (struct resizebilinear_plan *) nn_malloc(
 			sizeof(struct resizebilinear_plan) + wxd_align *(sizeof(planp->xoff[0])*2+sizeof(planp->xfrac[0])) + (wxd_align >>7)*sizeof(planp->xload[0]) + 0x80);
-		if (planp == NULL) return -1;
+		if (planp == NULL) return errlog(NULL," error in memory allocation of planp");
 		self->opaque = (void*)planp;
 		planp = (struct resizebilinear_plan*)(((size_t)planp + 0x7f)&-128);
 	}
@@ -1055,7 +1080,7 @@ weight_generation(
 			}
 			previdx = curridx;
 			if (curridx > previdx + 1) {
-				return -1;
+				return errlog(NULL,"curridx >previdx+1 in weight_generation() ");
 			}
 		}
 		if (depth == 2) {
@@ -1094,10 +1119,18 @@ static int resizebilinear_qu8_execute(struct nn_node *self, struct nn_graph *nn)
 
 	struct bilin_runstate runstate;
 	runstate.align_corners = 0;
-	if (self->n_inputs == 5)
+	runstate.half_pixel_centers = 0;
+	if (self->n_inputs >= 5) {
 		runstate.align_corners = *(int32_t *)(self->inputs[4]->data) != 0;
+	}
+	if (self->n_inputs >= 6) {
+		runstate.half_pixel_centers = *(int32_t *)(self->inputs[5]->data) != 0;
+	}
+	if (runstate.align_corners && runstate.half_pixel_centers)
+		return errlog(nn, "align_corners flag and half_pixel_centers flag cannot work together");
 
-	if (!runstate.align_corners && w_out == 2*w_in && h_out == 2*h_in &&
+	if (!runstate.align_corners && !runstate.half_pixel_centers &&
+		w_out == 2*w_in && h_out == 2*h_in &&
 		((d_in&(d_in-1)) == 0) &&
 		((d_in >=128) || ((w_in&(w_in-1)) == 0 ))) //if d<128, w must be a power of 2
 	{
@@ -1105,7 +1138,8 @@ static int resizebilinear_qu8_execute(struct nn_node *self, struct nn_graph *nn)
 		runstate.factor = 2;
 		runstate.resizebilinear_ptr = resizebilinear_2x;
 	}
-	else if (!runstate.align_corners && w_out == 4*w_in && h_out == 4*h_in && d_in < 32 && ((d_in & (d_in-1)) == 0)) {
+	else if (!runstate.align_corners && !runstate.half_pixel_centers &&
+			w_out == 4*w_in && h_out == 4*h_in && d_in < 32 && ((d_in & (d_in-1)) == 0)) {
 		runstate.inner_count = min_i32(h_in, NUM_THREADS); // partioned on height
 		runstate.factor = 4;
 		runstate.resizebilinear_ptr = resizebilinear_4x;
@@ -1186,7 +1220,7 @@ struct nn_node_ops nn_ops_for_ResizeBilinear_f = {
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.n_inputs = NN_IOCOUNT_RANGE(2,3),
+	.n_inputs = NN_IOCOUNT_RANGE(2,4),
 	.n_outputs = NN_IOCOUNT(1),
 };
 
@@ -1195,6 +1229,6 @@ struct nn_node_ops nn_ops_for_QuantizedResizeBilinear_8 = {
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
-	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_inputs = NN_IOCOUNT_RANGE(4,6),
 	.n_outputs = NN_IOCOUNT(3),
 };

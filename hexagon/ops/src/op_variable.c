@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -225,7 +225,7 @@ int do_variable_read(
 	uint32_t *data_out_len)
 {
 	struct nn_node *self = locate_variable_node( nn, node_id, output_index, "read" );
-	if( self == NULL ) return -1;
+	if( self == NULL ) return errlog(nn, "error in locate_variable_node()");
 	struct tensor *data = self->outputs[output_index];
 	if (data_out_max < data->data_size) return errlog(nn,"too small");
 	*b_out = data->shape.batches;
@@ -259,7 +259,7 @@ int do_variable_write(
 	uint32_t data_in_size)
 {
 	struct nn_node *self = locate_variable_node( nn, node_id, output_index, "write" );
-	if( self == NULL ) return -1;
+	if( self == NULL ) return errlog(nn, "error in locate_variable_node()");
 	struct tensor *data = self->outputs[output_index];
 	
 	unsigned elbytes = self->output_defs[output_index].elementsize;
@@ -304,7 +304,7 @@ int do_variable_write_flat(
 {
 	struct nn_node *self = locate_variable_node( nn, node_id, 
 		(output_index==-1)?0:output_index, "write_flat");
-	if( self == NULL ) return -1;
+	if( self == NULL ) return errlog(nn, "error in locate_variable_node()");
 	// select range: a single output, or all of them
 	int first_output = output_index;
 	int end_output  = output_index+1;

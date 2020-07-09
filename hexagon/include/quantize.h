@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -333,6 +333,32 @@ static inline int get_qu16_level_size_zero( float minval, float maxval, float * 
     *levsize_p = level_size;
     return saturate_u16( zeroval );
 }
+
+//this converts a min and max to level size for a qi16
+static inline float get_qi16_level_size(float minval, float maxval){
+	float level_size = (maxval-minval)*(float)(1.0f/65536.0f);
+	return level_size;
+}
+
+//this converts a level size value to a min and max value for a qi16
+static inline void get_qi16_min_max_from_level_size(float level_size, float *minval, float *maxval){
+	//From get_qi16_level_size we have
+	//float level_size = (maxval-minval)*(float)(1.0f/65536.0f);
+	//Given that we assume minval = -maxval
+	//We can rewrite as level_size = (2.0f*maxval)*(float)(1.0f/65536.0f)
+	//Thus maxval = (level_size*65536.0)/2.0 = (level_size * 32768)
+	*maxval = level_size * 32768.0f;
+	*minval = -(*maxval);
+}
+
+// this converts a min and max to level_size and 'zero' for qi32
+static inline int get_qi32_level_size_zero( float minval, float maxval, float * levsize_p){
+	float level_size = (maxval - minval)/0x1.0p32f;
+	int zeroval = 0;
+	*levsize_p = level_size;
+	return zeroval;
+}
+
 static inline uint16_t quantize_uint16(float val, float minval, float maxval)
 {
 	float range = fmaxf(1e-18f, maxval - minval);
@@ -554,7 +580,7 @@ check_range_is_sane( float min_in, float max_in)
 {
 
 	if (!flt_isfinite(min_in) || !flt_isfinite(max_in) || min_in > 0.0f || max_in < 0.0f || max_in - min_in < 1e-8f)
-		return -1;
+		return errlog(NULL,"range ( %f , %f ) is not sane",min_in,max_in);
 	return 0;
 }
 // this is like quantize_adjust_range but it also checks if supplied min, max are sane
@@ -598,7 +624,8 @@ int adjust_minmax_for_zero_16b(float *min_p, float *max_p);
 int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p, int constraint );
 int adjust_minmax_for_zero_with_constraints_16b( float *min_p, float *max_p, int constraint );
 void hvx_do_dequantize( uint8_t const * inp, float * outp, int n, int qzero, float qstep );
-
+void hvx_do_quantize_u16( const float *inp, uint8_t *outp, int n, uint32_t min_offset, uint32_t common_exp, uint32_t scaling);
+void hvx_do_dequantize_u16( uint8_t const * inp, float * outp, int n, int qzero, float qstep );
 
 //
 // requantize n 32-bit numbers to u8; equiv to
@@ -637,18 +664,19 @@ void hvx_quantize_32_to_8(
 		int n );					// # elements
 
 int find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out);
+int find_scaling_for_hvx_quant_u16 ( float const minmax[2], struct hvx_quant_parms *out);
 static inline int QuantizeMultiplierSmallerThanOne(float multiplier, int32_t *quantized_multiplier, int32_t *right_shift)
 {
 	if (multiplier <= 0 || multiplier >= 1)
 	{
-		return -1;
+		return errlog(NULL,"multiplier = %f is not in range ",multiplier);
 	}
 	const float q = flt_getfrac(multiplier);
 	*right_shift = -flt_getexp(multiplier);
 	int64_t q_fixed = (int64_t)(floorf(q * (1LL << 31)));
 	if (q_fixed > (1LL << 31))
 	{
-		return -1;
+		return errlog(NULL,"q_fixed = %ld is greater than limit (1LL << 31)",q_fixed);
 	}
 	if (q_fixed == (1LL << 31))
 	{
@@ -657,11 +685,11 @@ static inline int QuantizeMultiplierSmallerThanOne(float multiplier, int32_t *qu
 	}
 	if (*right_shift < 0)
 	{
-		return -1;
+		return errlog(NULL,"right_shift = %d less than 0",*right_shift);
 	}
 	if (q_fixed > ((2LL << 31) - 1))
 	{
-		return -1;
+		return errlog(NULL,"q_fixed = %ld greater than limit",q_fixed);
 	}
 	*quantized_multiplier = (int32_t)(q_fixed);
 	return 0;

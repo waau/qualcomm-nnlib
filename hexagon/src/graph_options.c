@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -93,7 +93,7 @@ int nn_opt_setter_int( struct nn_graph * nn, int code, int value )
 	struct nn_graph_graphopts * optp = &nn->graph_options;
 	code -= NN_OPTIONS_INT_BASE;
 	if(code < 0 || code > NN_OPTIONS_N_INT){
-		return -1;
+		return errlog(nn, " code = %d < 0 or > NN_OPTIONS_N_INT ",code );
 	}
 	optp->int_opts[code] = value;
 	return 0;
@@ -104,7 +104,7 @@ int nn_opt_setter_bool( struct nn_graph * nn, int code, int value )
 	struct nn_graph_graphopts * optp = &nn->graph_options;
 	code -= NN_OPTIONS_BOOL_BASE;
 	if(code < 0 || code > NN_OPTIONS_N_BOOL){
-		return -1;
+		return errlog(nn, " code =%d < 0 or code > NN_OPTIONS_N_BOOL",code);
 	}
 	uint32_t *pos = &optp->bool_opts[code/32u];
 	int bit = (1<< code %32u);

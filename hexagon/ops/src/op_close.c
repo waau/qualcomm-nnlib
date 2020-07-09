@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -681,8 +681,8 @@ static int close_execute_q_u16(struct nn_node *self, struct nn_graph *nn)
 	float error_ratio_float = (NULL != error_ratio) ? tensor_get_float(error_ratio,0) : FUDGE_FACTOR;
 	float dut_range = (dut_max_float - dut_min_float);
 	float ref_range = (ref_max_float - ref_min_float);
-	float dut_stepsize = dut_range /  65535.0f;
-	float ref_stepsize = ref_range /  65535.0f;
+	float dut_stepsize = dut_range /  65536.0f;
+	float ref_stepsize = ref_range /  65536.0f;
 	float max_error_ratio = 0.0;
 	float curr_error_ratio = 0.0;
 	const uint16_t *dutdata = dut->data;
@@ -715,8 +715,8 @@ static int close_execute_q_u16(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"Closeness checking... dut min/max: %f/%f ref min/max: %f/%f",
 		   dut_min_float,dut_max_float,ref_min_float,ref_max_float);
 	for (i = 0; i < count; i++) {
-		dutval = dutdata[i] * dut_stepsize ;
-		refval = refdata[i+offset] * ref_stepsize;
+		dutval = dutdata[i] * dut_stepsize + dut_min_float ;
+		refval = refdata[i+offset] * ref_stepsize + ref_min_float;
 		curr_error_ratio = fabsf((dutval-refval)/ref_range);
 
 		if (curr_error_ratio > error_ratio_float) {

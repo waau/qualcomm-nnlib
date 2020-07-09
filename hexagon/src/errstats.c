@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -126,7 +126,7 @@ int nn_errstats_find_correlation(
  struct nn_graph *nn, int level, struct err_stats const * esp,
  int xa, int xb, int xc)
 {
-	if( esp-> ncount_notsat < 6 ) return -1;
+	if( esp-> ncount_notsat < 6 ) return errlog(nn, "error in params in nn_errstats_find_correlation() ");
 
 	float pop = esp->ncount_notsat;
 

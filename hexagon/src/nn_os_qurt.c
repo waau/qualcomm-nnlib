@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -38,6 +38,7 @@
 #include <qurt.h>
 #include <nn_graph.h>
 #include <HAP_power.h>
+#include <HAP_ps.h>
 
 #define DEFAULT_MAIN_PRIORITY   0xC0
 #define MIN_MAIN_PRIORITY       0xBB
@@ -71,7 +72,7 @@ void* HAP_request_async_VTCM(unsigned int size,
 #define VTCM_AMT (256*1024)
 int nn_os_vtcm_fake_acquire(struct nn_graph *nn)
 {
-	logmsg(nn,1,"couldn't acquire VTCM");
+	logmsg(nn,0,"couldn't acquire VTCM");
 	if (unlikely(nn->fake_vtcm_ptr == NULL)) {
 		if ((nn->fake_vtcm_ptr = nn_memalign(128,VTCM_AMT)) == NULL) {
 			return errlog(nn,"Oops, can't memalign fake VTCM");
@@ -79,6 +80,7 @@ int nn_os_vtcm_fake_acquire(struct nn_graph *nn)
 	}
 	nn->vtcm_ptr = nn->fake_vtcm_ptr;
 	nn->vtcm_size = VTCM_AMT;
+	nn->vtcm_is_real = 0;
 	return 0;
 }
 extern int VTCM_User_Req;
@@ -135,6 +137,8 @@ int nn_os_vtcm_acquire(struct nn_graph *nn)
 
 	nn_os_vtcm_choose_size(nn);
 
+    // Assume real vtcm.  Fake acquire will unset this.
+	nn->vtcm_is_real = 1;
 	if (nn->vtcm_size == 0) {
 #if defined(HEXAGON_V66)
 		return errlog(nn, "ERROR: NO VTCM. Required for V66");
@@ -152,7 +156,7 @@ int nn_os_vtcm_acquire(struct nn_graph *nn)
         ptr = HAP_request_VTCM(nn->vtcm_size, 0);
     }
     else {
-	    unsigned int timeout_us = 500*1000;
+	    unsigned int timeout_us = nn->deadline_us > 0 && nn->deadline_us < 500*1000? nn->deadline_us : 500*1000;
 	    ptr = HAP_request_async_VTCM(nn->vtcm_size, use_single_page, timeout_us);
     }
 #elif defined(HEXAGON_V65)
@@ -188,6 +192,7 @@ int nn_os_vtcm_release(struct nn_graph *nn)
 	}
 	nn->vtcm_ptr = NULL;
 	nn->vtcm_size = 0;
+	nn->vtcm_is_real = 0;
 #endif
 	return 0;
 }
@@ -205,6 +210,31 @@ void nn_os_vector_release(int idx)
         errlog(NULL,"couldn't unlock hvx\n");
     }
 }
+
+/*
+ * This function alerts the CPU to wake-up before the thread execution completes
+ * (~30 us after this call is made) and will keep the CPU polling for the
+ * specified amount of time: early_hint_value. This reduces the time spent handling
+ * data transfers between the DSP and the CPU (reduces RPC time). This hint value
+ * should be as close to the amount of time before the return from the DSP to the
+ * CPU as possible, otherwise it should be less than 500us if no accurate
+ * estimate can be made. Currently set to 250 from testing and best-guess
+ * approximation (set in nn_graph_os.h)
+ *
+ */
+
+#pragma weak fastrpc_send_early_signal
+int nn_os_send_early_wakeup(uint32_t early_hint_value)
+{
+	int skelCallerThreadId = qurt_thread_get_id();
+
+	if (fastrpc_send_early_signal) {
+		/* Signal present on this target. Try giving a hint of early completion signal to FastRPC driver */
+		return (int) fastrpc_send_early_signal(skelCallerThreadId, early_hint_value);
+	}
+	return -1;
+}
+
 
 /*
  * This, and the power off counterpart, MUST be called while the

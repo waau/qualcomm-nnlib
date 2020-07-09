@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -993,7 +993,7 @@ set_addsub_scaling_for_output_range( struct elementwise_d32_info *info, int fixe
 	//
 	int scexp = flt_getexp(scaleval* (float)(16384./16380.) );
 	if( scexp > 6 && ( !fixed_range || scexp>12) )		// req. scale is too large
-		return -1;
+		return errlog(NULL,"scexp =%d not in range ",scexp);
 	int rsh = min_i32(6-scexp,7);  // should be 0..6 (maybe 7 sometimes); or -6..0 when underrange
 
 	// important: rsh=0 is 'underrange' when fixed_range, and not otherwise (this lets us get
@@ -1126,7 +1126,7 @@ check_addsub_need_rerun( struct nn_graph *nn, struct elementwise_d32_info *info,
 	}
 	logmsg(nn,3,"rerange to %f  ... %f\n", info->out_min, info->out_max);
 	int res = set_addsub_scaling_for_output_range(info, 0);
-	if( res <0) return -1;
+	if( res <0) return errlog(nn," set_addsub_scaling_for_output_range() = %d < 0 ",res);
 	return 1;
 }
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -1273,7 +1273,7 @@ mul_setup_scaling( struct nn_graph *nn, struct nn_node *self)
 		}
 	}
 	int res =set_mul_scaling_for_output_range( info );
-	if( res != 0) return errlog(nn,"scaling failed");
+	if( res != 0) return errlog(nn,"set_mul_scaling_for_output_range() = %d  failed",res);
 
 	logmsg(nn,3,"scale for %f * %f -> [%f..%f]:  * %d >> %d; adj_bias = %d, range_bias =%d\n",
 			info->ab_stepsize[0], info->ab_stepsize[1], info->out_min, info->out_max,
@@ -1381,7 +1381,7 @@ check_mul_need_rerun( struct nn_graph *nn, struct elementwise_d32_info *info, in
 	}
 	logmsg(nn,3,"rerange to %f  ... %f\n", info->out_min, info->out_max);
 	int res = set_mul_scaling_for_output_range(info);
-	if( res <0) return -1;
+	if( res <0) return errlog(nn," set_mul_scaling_for_output_range() =%d ",res);
 	return 1;
 }
 ///////////////////////////////////////////////////////////////////////////////////////
@@ -1491,7 +1491,7 @@ static int addsub_d32_execute_common(struct nn_node *self, struct nn_graph *nn)
 		if( res == 0){
 			res =(info->setup_scaling_funcp)( nn,self);
 		}
-		if( res !=0 ) return -1;
+		if( res !=0 ) return errlog(nn," failure in elementwise_strategy_valid_check() or setup_elementwise_strategy() or info->setup_scaling_funcp() ");
 	}
 
 	// strategy is good to go..
@@ -1509,7 +1509,7 @@ static int addsub_d32_execute_common(struct nn_node *self, struct nn_graph *nn)
 			 (int)info->broadcast_mode, info->compat_flags, info->run_height,info->run_nd32, info->run_depth,
 			(int)info->out_shape.batches, info->height_chunks, info->chunk_rows, info->num_work_units );
 
-	if( info->core_oper_funcp == NULL) return errlog(nn,"did not set function");
+	if( info->core_oper_funcp == NULL) return errlog(nn,"did not set function info->core_oper_funcp");
 
 	int need_ranging = (info->min_max_precalc ==3)? 0:1;
 	int ran_again = 0;
@@ -1533,7 +1533,7 @@ static int addsub_d32_execute_common(struct nn_node *self, struct nn_graph *nn)
 			break;
 		int need_rerun = (*info->check_need_rerun_funcp)( nn, info, nthreads );
 		if( need_rerun <= 0){
-			if( need_rerun < 0) return -1;
+			if( need_rerun < 0) return errlog(nn," need_rerun < 0 ");
 			break;
 		}
 		ran_again = 1;	// only for TEST_PERFORMANCE
@@ -2965,7 +2965,7 @@ struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8_d32 = {
 	.ctor = node_alloc_common,
 	.dtor = addsub_d32_dtor,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
-	.n_inputs = NN_IOCOUNT(6),
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
 	.n_outputs = NN_IOCOUNT(3),
 };
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8_d32_ref = {
@@ -2974,7 +2974,7 @@ struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8_d32_ref = {
 	.ctor = node_alloc_common,
 	.dtor = addsub_d32_dtor,
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
-	.n_inputs = NN_IOCOUNT(6),
+	.n_inputs = NN_IOCOUNT_RANGE(6,8),
 	.n_outputs = NN_IOCOUNT(3),
 };
 //////////// NEG ///////////////////

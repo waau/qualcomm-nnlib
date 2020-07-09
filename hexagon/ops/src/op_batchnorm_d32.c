@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -190,12 +190,12 @@ static inline int set_scale_from_input(
 	float bias_adapt = bias_step/ds128_step;
 	int ba_exp = flt_getexp( bias_adapt * 1.00001831f)-15;	// exponent (with margin)
 	if( !bias32){
-		if( ba_exp > 6) return -1;
+		if( ba_exp > 6) return errlog(NULL,"ba_exp = %d> 6",ba_exp);
 		ba_exp = max_i32(ba_exp,-31);	// absurdly small #, limit to avoid overshift
 		scp->bias_lsh = max_i32( ba_exp, 0);
 		scp->bias_rsh = max_i32( -ba_exp, 0);
 	}else{
-		if( ba_exp > 1) return -1;	// avoid rsh < -16
+		if( ba_exp > 1) return errlog(NULL,"ba_exp= %d  > 1 ",ba_exp);	// avoid rsh < -16
 		ba_exp = max_i32(ba_exp,-46);	// avoid rsh > 31
 		scp->bias_lsh = 0;
 		scp->bias_rsh = -(15+ba_exp);	// may be -16 .. 31 (but only <0 when bias range is underused)
@@ -223,7 +223,7 @@ static inline int set_scale_for_output(
 
 	int ra_exp = - flt_getexp( res_adapt * 1.00001831f);		// exponent (with margin)
 	// the exponent is the right-shift we need to do.
-	if( ra_exp < 1|| ra_exp > 29) return -1;				// not sane
+	if( ra_exp < 1|| ra_exp > 29) return errlog(NULL,"ra_exp = %d <1 or >29",ra_exp);				// not sane
 	ra_exp = min_i32( ra_exp, 22);					// will generate a subnormal result_scale if this clips
 
 	int32_t res_offs = 0;		// output offset for out_min
@@ -393,7 +393,7 @@ static int batchnorm_d32_execute(struct nn_node *self, struct nn_graph *nn)
 			scalar_in[2], scalar_in[3],		// scale min/max
 			scalar_in[4], scalar_in[5], bias32);		// bias min/max
 
-	if( res != 0) return  errlog(nn, "failed to set scaling");
+	if( res != 0) return  errlog(nn, " set_scale_from_input() =%d   failed",res);
 
 	// if this is the first run, take a guess at the output range
 	// we use 20% of the calculated max range, which is unlikely to be sufficient but
@@ -455,7 +455,7 @@ static int batchnorm_d32_execute(struct nn_node *self, struct nn_graph *nn)
 
 		res = set_scale_for_output( &runstt.scl, info->out_min, info->out_max);
 		if( res != 0)
-			return errlog(nn,"failed to set output scaling");
+			return errlog(nn,"set_scale_for_output= %d",res);
 
 		// reset the indicies that the worker threads use to allocate buffer & jobs
 		runstt.next_job = 0;

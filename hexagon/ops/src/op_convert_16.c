@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -95,14 +95,14 @@ struct nn_node_ops nn_ops_for_Dequantize_16 = {
 	.n_outputs = NN_IOCOUNT(1),
 
 };
-struct nn_node_ops nn_ops_for_Dequantize_u16 = {
+/*struct nn_node_ops nn_ops_for_Dequantize_u16 = {
 	.execute = dequant_16_execute,
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.n_inputs = NN_IOCOUNT(3),
 	.n_outputs = NN_IOCOUNT(1),
-};
+};*/
 ///////////////////////////////////////////////////////
 //  Quantize_16:
 ///     input 0:  float flat tensor, any shape
@@ -175,14 +175,14 @@ struct nn_node_ops nn_ops_for_Quantize_16 = {
 	.n_inputs = NN_IOCOUNT(3),
 	.n_outputs = NN_IOCOUNT(3),
 };
-struct nn_node_ops nn_ops_for_Quantize_u16 = {
+/*struct nn_node_ops nn_ops_for_Quantize_u16 = {
 	.execute = quant_x16_execute,
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
 	.n_inputs = NN_IOCOUNT(3),
 	.n_outputs = NN_IOCOUNT(3),
-};
+};*/
 ///////////////////////////////////////////////////////
 //  Convert_8_16:
 ///     input 0: u8 flat tensor, any shape
@@ -384,7 +384,7 @@ static int cvt_x16_8_execute(struct nn_node *self, struct nn_graph *nn)
 	tensor_set_single_float( self->outputs[1], out_minval );
 	tensor_set_single_float( self->outputs[2], out_maxval );
 	// now set scale_fac and rsh
-	int rsh = max_i32(7,-1-flt_getexp(conv_ratio*0.99993896f));
+	int rsh = min_i32(7,-1-flt_getexp(conv_ratio*0.99993896f));
 	int scale_fac,offset;
 	while(1){
 		scale_fac = roundf_i32( flt_ldexp(conv_ratio,rsh+15));

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -49,9 +49,9 @@ long graph_config(
 
 long get_dsp_offset(rout unsigned long libhexagon_addr, rout unsigned long fastrpc_shell_addr);
 
-long udo_register_lib(in string so_path_name, rout hexagon_nn_udo_err err);
+long register_udo_lib(in string so_path_name, rout uint32_t udo_lib_registration_id, rout hexagon_nn_udo_err err);
 
-long free_udo_individual_lib(in string package_name, rout hexagon_nn_udo_err err);
+long free_udo_individual_lib(in uint32_t udo_lib_registration_id, rout hexagon_nn_udo_err err);
 
 long free_udo_libs(rout hexagon_nn_udo_err err);
 
@@ -240,6 +240,17 @@ long set_graph_option(in hexagon_nn_nn_id id, in string name, in long value);
 
 /* program cached Graph.  Internal API, Do Not Use*/
 long populate_graph(in hexagon_nn_nn_id id, in sequence<octet> graph_data);
+
+
+long serialize_size(in hexagon_nn_nn_id id, rout unsigned long serialized_obj_size_out, rout unsigned long return_code);
+
+long serialize(in hexagon_nn_nn_id id, rout sequence<octet> buffer, rout unsigned long return_code);
+
+long deserialize(in sequence<octet> buffer, rout hexagon_nn_nn_id new_graph_out, rout unsigned long return_code);
+
+long execute_with_option(in hexagon_nn_nn_id id, in sequence<hexagon_nn_tensordef> inputs,
+    rout sequence<hexagon_nn_tensordef> outputs, rout hexagon_nn_execute_info execute_info,
+    in sequence<hexagon_nn_execute_option> in_options);
 
 /*^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 //   Add new interfaces to the end!!!!

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -68,6 +68,8 @@ int nn_check_prepare_hvx_opt(
 	int elements, bhw, i;
 	int a_const_value = 0;
 	int b_const_value = 0;
+	int use_a_const = 0;
+	int use_b_const = 0;
 
 	tensor_get_shape(a_tensor,&ab,&ah,&aw,&ad);
 	tensor_get_shape(b_tensor,&bb,&bh,&bw,&bd);
@@ -87,6 +89,7 @@ int nn_check_prepare_hvx_opt(
 
 		opt_flag = 1;
 		a_const_value = a_data[0];
+		use_a_const = 1;
 	}
 	else if((bb==1)&&(bh==1)&&(bw==1)&&(bd==1))	{
 		elements = ab*ah*aw*ad;
@@ -101,6 +104,7 @@ int nn_check_prepare_hvx_opt(
 
 		opt_flag = 1;
 		b_const_value = b_data[0];
+		use_b_const = 1;
 	}
 
 	/* Both operands are of same dimensions */
@@ -173,6 +177,8 @@ int nn_check_prepare_hvx_opt(
 		opt_info->elements = elements;
 		opt_info->a_const_value = a_const_value;
 		opt_info->b_const_value = b_const_value;
+		opt_info->use_a_const = use_a_const;
+		opt_info->use_b_const = use_b_const;
 	}
 
 	return opt_flag;

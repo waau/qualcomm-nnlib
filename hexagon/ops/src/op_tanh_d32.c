@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -352,27 +352,6 @@ tanh_d32_run_thread( struct nn_graph * nn, void * rstpv)
 	}
 	nn_sem_post( & rstp->done_sem);
 }
-
-static inline HVX_Vector
-hvx_table_lookup_u8( HVX_Vector vin, HVX_Vector lut0, HVX_Vector lut1)
-{
-	HVX_Vector vout =  q6op_Vb_vlut32_VbVbI( vin,lut0, 0 );
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,1);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,2);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,3);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,4);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,5);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,6);
-	vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,7);
-	return vout;
-}
-
-//
-// flat mode is like d32 mode except
-//  - no 'reference' operator
-//  - each 'work unit' is TANH_FLATMODE_WORKUNIT_VECS vectors (the last one can be smaller,
-//   and may not be a full vector.
-//
 
 static void
 tanh_flat_run_thread( struct nn_graph * nn, void * rstpv)

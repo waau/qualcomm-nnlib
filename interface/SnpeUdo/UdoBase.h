@@ -1,6 +1,6 @@
 //==============================================================================
 //
-// Copyright (c) 2019 Qualcomm Technologies, Inc.
+// Copyright (c) 2019-2020 Qualcomm Technologies, Inc.
 // All Rights Reserved.
 // Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -13,8 +13,11 @@
 
 // Provide values to use for API version.
 #define API_VERSION_MAJOR 1
-#define API_VERSION_MINOR 3
+#define API_VERSION_MINOR 4
 #define API_VERSION_TEENY 0
+
+/** @addtogroup c_plus_plus_apis C++
+@{ */
 
 // Defines a bitmask of enum values.
 typedef uint32_t SnpeUdo_Bitmask_t;
@@ -28,7 +31,7 @@ typedef char* SnpeUdo_String_t;
 // than this.
 #define SNPE_UDO_MAX_STRING_SIZE 1024
 
-/*!
+/**
   * An enum which holds the various error types.
   * The error types are divided to classes :
   * 0 - 99    : generic errors
@@ -37,22 +40,34 @@ typedef char* SnpeUdo_String_t;
   */
 typedef enum
 {
+   /// No Error
    SNPE_UDO_NO_ERROR                    = 0,
+   /// Unsupported value for core type
    SNPE_UDO_WRONG_CORE                  = 1,
+   /// Invalid attribute/argument passed into UDO API
    SNPE_UDO_INVALID_ARGUMENT            = 2,
+   /// Unsupported feature error
    SNPE_UDO_UNSUPPORTED_FEATURE         = 3,
+   /// Error relating to memory allocation
    SNPE_UDO_MEM_ALLOC_ERROR             = 4,
    /* Configuration Specific errors */
+   /// No op with given attributes available in library
    SNPE_UDO_WRONG_OPERATION             = 100,
+   /// Unsupported value for core type in UDO configuration
    SNPE_UDO_WRONG_CORE_TYPE             = 101,
+   /// Wrong number of params in UDO definition
    SNPE_UDO_WRONG_NUM_OF_PARAMS         = 102,
+   /// Wrong number of dimensions for tensor(s) in UDO definition
    SNPE_UDO_WRONG_NUM_OF_DIMENSIONS     = 103,
+   /// Wrong number of input tensors in UDO definition
    SNPE_UDO_WRONG_NUM_OF_INPUTS         = 104,
+   /// Wrong number of output tensors in UDO definition
    SNPE_UDO_WRONG_NUM_OF_OUTPUTS        = 105,
+   SNPE_UDO_PROGRAM_CACHE_NOT_FOUND     = 106,
    SNPE_UDO_UNKNOWN_ERROR               = 0xFFFFFFFF
 } SnpeUdo_ErrorType_t;
 
-/*!
+/**
   * An enum which holds the various data types.
   * Designed to be used as single values or combined into a bitfield parameter
   * (0x1, 0x2, 0x4, etc)
@@ -61,30 +76,45 @@ typedef enum
   */
 typedef enum
 {
+   /// data type: 16-bit floating point
    SNPE_UDO_DATATYPE_FLOAT_16       = 0x01,
+   /// data type: 32-bit floating point
    SNPE_UDO_DATATYPE_FLOAT_32       = 0x02,
+   /// data type: 4-bit fixed point
    SNPE_UDO_DATATYPE_FIXED_4        = 0x04,
+   /// data type: 8-bit fixed point
    SNPE_UDO_DATATYPE_FIXED_8        = 0x08,
+   /// data type: 16-bit fixed point
    SNPE_UDO_DATATYPE_FIXED_16       = 0x10,
+   /// data type: 32-bit fixed point
    SNPE_UDO_DATATYPE_FIXED_32       = 0x20,
+   /// data type: 8-bit unsigned integer
    SNPE_UDO_DATATYPE_UINT_8         = 0x100,
+   /// data type: 16-bit unsigned integer
    SNPE_UDO_DATATYPE_UINT_16        = 0x200,
+   /// data type: 32-bit unsigned integer
    SNPE_UDO_DATATYPE_UINT_32        = 0x400,
+   /// data type: 8-bit signed integer
    SNPE_UDO_DATATYPE_INT_8          = 0x1000,
+   /// data type: 16-bit signed integer
    SNPE_UDO_DATATYPE_INT_16         = 0x2000,
+   /// data type: 32-bit signed integer
    SNPE_UDO_DATATYPE_INT_32         = 0x4000,
    SNPE_UDO_DATATYPE_LAST           = 0xFFFFFFFF
 } SnpeUdo_DataType_t;
 
-/*!
+/**
   * An enum which holds the various layouts.
   * Designed to be used as single values or combined into a bitfield parameter
   * (0x1, 0x2, 0x4, etc)
   */
 typedef enum
 {
+   /// data layout (4D): NHWC (batch-height-width-channel)
    SNPE_UDO_LAYOUT_NHWC             = 0x01,
+   /// data layout (4D): NCHW (batch-channel-height-width)
    SNPE_UDO_LAYOUT_NCHW             = 0x02,
+   /// data layout (5D): NDHWC (batch-dimension-height-width-channel)
    SNPE_UDO_LAYOUT_NDHWC            = 0x04,
    SNPE_UDO_LAYOUT_GPU_OPTIMAL1     = 0x08,
    SNPE_UDO_LAYOUT_GPU_OPTIMAL2     = 0x10,
@@ -96,7 +126,7 @@ typedef enum
    SNPE_UDO_LAYOUT_LAST             = 0xFFFFFFFF
 } SnpeUdo_TensorLayout_t;
 
-/*!
+/**
   * An enum which holds the UDO library Core type .
   * Designed to be used as single values or combined into a bitfield parameter
   * (0x1, 0x2, 0x4, etc)
@@ -114,23 +144,28 @@ typedef enum
    SNPE_UDO_CORETYPE_LAST         = 0xFFFFFFFF
 } SnpeUdo_CoreType_t;
 
-/*!
+/**
   * An enum to specify the parameter type : Scalar or Tensor
   */
 typedef enum
 {
+   /// UDO static param type: scalar
    SNPE_UDO_PARAMTYPE_SCALAR,
+   /// UDO static param type: string
    SNPE_UDO_PARAMTYPE_STRING,
+   /// UDO static param type: tensor
    SNPE_UDO_PARAMTYPE_TENSOR,
    SNPE_UDO_PARAMTYPE_LAST   = 0xFFFFFFFF
 } SnpeUdo_ParamType_t;
 
-/*!
+/**
   * An enum to specify quantization type
   */
 typedef enum
 {
+   /// Tensor Quantization type: NONE. Signifies unquantized tensor data
    SNPE_UDO_QUANTIZATION_NONE,
+   /// Tensor Quantization type: Tensorflow-style
    SNPE_UDO_QUANTIZATION_TF,
    SNPE_UDO_QUANTIZATION_QMN,
    SNPE_UDO_QUANTIZATION_LAST   = 0xFFFFFFFF
@@ -142,8 +177,11 @@ typedef enum
  */
 typedef struct
 {
+   /// version field: major - for backward-incompatible changes
    uint32_t major;
+   /// version field: minor - for backward-compatible feature updates
    uint32_t minor;
+   /// version field: teeny - for minor bug-fixes and clean-up
    uint32_t teeny;
 } SnpeUdo_Version_t;
 
@@ -153,23 +191,32 @@ typedef struct
  */
 typedef struct
 {
+   /// Version of UDO library. Controlled by users
    SnpeUdo_Version_t libVersion;
+   /// Version of SNPE UDO API used in compiling library. Determined by SNPE
    SnpeUdo_Version_t apiVersion;
 } SnpeUdo_LibVersion_t;
 
 /**
- * @brief A union to hold the value of a generic type. allows defining a parameter struct
- * in a generic way, with a "value" location that holds the data regradless of the type.
+ * @brief A union to hold the value of a generic type. Allows defining a parameter struct
+ * in a generic way, with a "value" location that holds the data regardless of the type.
  *
  */
 typedef union
 {
+   /// value type: float
    float    floatValue;
+   /// value type: unsigned 32-bit integer
    uint32_t uint32Value;
+   /// value type: signed 32-bit integer
    int32_t  int32Value;
+   /// value type: unsigned 16-bit integer
    uint16_t uint16Value;
+   /// value type: signed 16-bit integer
    int16_t  int16Value;
+   /// value type: unsigned 8-bit integer
    uint8_t  uint8Value;
+   /// value type: signed 8-bit integer
    int8_t   int8Value;
 } SnpeUdo_Value_t;
 
@@ -191,7 +238,9 @@ typedef struct
  */
 typedef struct
 {
+   /// minimum value of the quantization range of data
    float minValue;
+   /// maximum value of the quantization range of data
    float maxValue;
 } SnpeUdo_TFQuantize_t;
 
@@ -201,10 +250,12 @@ typedef struct
  */
 typedef struct
 {
+   /// quantization type (only TF-style currently supported)
    SnpeUdo_QuantizationType_t quantizeType;
    union
    {
-      SnpeUdo_TFQuantize_t TFParams;
+     /// TF-style min-max quantization ranges
+     SnpeUdo_TFQuantize_t TFParams;
    };
 } SnpeUdo_QuantizeParams_t;
 
@@ -217,40 +268,46 @@ typedef struct
 {
    /// The maximum allowable dimensions of the tensor. The memory held in
    /// _tensorData_ is guaranteed to be large enough for this.
-   uint32_t*               maxDimensions;
+   uint32_t*                maxDimensions;
    /// The current dimensions of the tensor. An operation may modify the current
    /// dimensions of its output, to indicate cases where the output has been
    /// "resized".
    /// Note that for static parameters, the current and max dimensions must
    /// match.
-   uint32_t*               currDimensions;
+   uint32_t*                currDimensions;
+   /// Quantization params applicable to the tensor. Currently only supports
+   /// Tensorflow quantization style.
    SnpeUdo_QuantizeParams_t quantizeParams;
-   uint32_t                tensorRank;
-   /// The parameter data type : float, int, etc.
+   /// Number of dimensions to the tensor: 3D, 4D, etc.
+   uint32_t                 tensorRank;
+   /// The parameter data type: float, int, etc.
    SnpeUdo_DataType_t       dataType;
-   /// The tensor layout type : NCHW, NHWC, etc.
+   /// The tensor layout type: NCHW, NHWC, etc.
    SnpeUdo_TensorLayout_t   layout;
-   /// Cast to the right structure GPU tensor Data or DSP tensor data
-   void*                   tensorData;
+   /// Opaque pointer to tensor data. User may be required to re-interpret the pointer
+   /// based on core-specific definitions.
+   void*                    tensorData;
 } SnpeUdo_TensorParam_t;
 
 /**
- * @brief A struct which defines a UDO parameter- a union of scalar and tensor parameters
+ * @brief struct which defines a UDO parameter - a union of scalar, tensor and string parameters
  *
  */
 typedef struct
 {
    /// Type is scalar or tensor
-   SnpeUdo_ParamType_t paramType;
-   /// The param name, for example : "offset", "activation_type"
-   SnpeUdo_String_t    paramName;
-   union
-   {
-      SnpeUdo_ScalarParam_t scalarParam;
-      SnpeUdo_TensorParam_t tensorParam;
-      SnpeUdo_String_t      stringParam;
-   };
-
+  SnpeUdo_ParamType_t paramType;
+  /// The param name, for example : "offset", "activation_type"
+  SnpeUdo_String_t    paramName;
+  union
+  {
+    /// scalar param value
+    SnpeUdo_ScalarParam_t scalarParam;
+    /// tensor param value
+    SnpeUdo_TensorParam_t tensorParam;
+    /// string param value
+    SnpeUdo_String_t      stringParam;
+  };
 } SnpeUdo_Param_t;
 
 /**
@@ -260,7 +317,6 @@ typedef struct
 typedef struct
 {
    /// The IP Core
-   ///
    SnpeUdo_CoreType_t     udoCoreType;
    /// Bitmask, defines supported internal calculation types (like FLOAT_32, etc)
    /// Based on SnpeUdo_DataType
@@ -268,26 +324,31 @@ typedef struct
 } SnpeUdo_OpCoreInfo_t;
 
 /**
- * @brief A struct which defines the Operation information - both the Shared and the Core Specific
+ * @brief A struct which defines the common and core-specific Operation information
  *
  */
 typedef struct
 {
-   /// The operation type, for example : "MY_COOL_OP"
-   SnpeUdo_String_t  operationType;
+   /// Operation type
+   SnpeUdo_String_t      operationType;
    /// A bitmask describing which IP Cores (CPU, GPU, DSP ...) support this operation
    /// Translated based on SnpeUdo_CoreType
-   SnpeUdo_Bitmask_t supportedByCores;
-   uint32_t numOfStaticParams;
-   SnpeUdo_Param_t* staticParams;
-   uint32_t numOfInputs;
-   /// Names of the inputs to this operation. Length is numOfInputs.
-   SnpeUdo_String_t* inputNames;
-   uint32_t numOfOutputs;
-   // Names of the outputs of this operation. Length is numOfOutputs.
-   SnpeUdo_String_t* outputNames;
-   uint32_t numOfCoreInfo;
-   /// Array which defines per-core information like input/output types, etc.
+   SnpeUdo_Bitmask_t     supportedByCores;
+   /// Number of static parameters defined by the op
+   uint32_t              numOfStaticParams;
+   /// Array of static parameters. Can be scalar or tensor params
+   SnpeUdo_Param_t*      staticParams;
+   /// Number of input tensors this op receives
+   uint32_t              numOfInputs;
+   /// Array of names input tensors to this operation
+   SnpeUdo_String_t*     inputNames;
+   /// Number of output tensors this op receives
+   uint32_t              numOfOutputs;
+   /// Array of names output tensors to this operation
+   SnpeUdo_String_t*     outputNames;
+   /// Number of cores that the op can execute on
+   uint32_t              numOfCoreInfo;
+   /// Array of per-core information entries
    SnpeUdo_OpCoreInfo_t* opPerCoreInfo;
 } SnpeUdo_OperationInfo_t;
 
@@ -329,8 +390,8 @@ typedef struct
 } SnpeUdo_RegInfo_t;
 
 /**
-* @brief A struct returned by the implementation library and contains information on the specific library :
-* name, IP Core, operations, etc.
+* @brief A struct returned by the implementation library and contains information on the
+* specific library: name, IP Core, operations, etc.
 *
 */
 typedef struct
@@ -356,7 +417,7 @@ typedef struct
 {
    /// The IP Core that the operation is defined for - CPU, GPU, DSP...
    SnpeUdo_CoreType_t      udoCoreType;
-   /// The operation type, for example : "MY_COOL_OP"
+   /// Operation type
    SnpeUdo_String_t        operationType;
    /// The number of static parameters provided in the staticParams array.
    /// this number has to match the number provided by the UDO Registration library information
@@ -377,5 +438,6 @@ typedef struct
    SnpeUdo_TensorParam_t*  outputs;
 } SnpeUdo_OpDefinition_t;
 
-#endif //SNPE_UDO_BASE_H
+/** @} */ /* end_addtogroup c_plus_plus_apis C++ */
 
+#endif //SNPE_UDO_BASE_H

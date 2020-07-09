@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -45,6 +45,21 @@
 //#define ITERS (50*120)
 
 nn_mutex_t graph_mutex = NN_MUTEX_INIT; // Should we move this to the graph table?
+
+#if !defined(NO_PREEMPTION)
+nn_mutex_t priority_counts_mutex = NN_MUTEX_INIT;
+
+#if !defined(V65) && !defined(V66)
+static uint32_t executing_threads = 0;
+#endif
+
+static uint32_t priority_counts[2] = {0, 0};
+
+#define VTCM_RELEASE nn_os_vtcm_release(nn); \
+		     have_vtcm = 0; \
+		     nn_mutex_unlock(&graph_mutex);
+#endif
+
 /*
  * Since QuRT (especially) isn't very POSIX, we have a tricky time setting up a mutex.
  * We can't use PTHREAD_MUTEX_INITIALIZER
@@ -80,6 +95,7 @@ void execute_check_dst_canaries(struct nn_graph *nn, struct nn_node *node)
 	}
 }
 
+#if defined(NO_PREEMPTION)
 int do_execute(struct nn_graph *nn, execute_basic_info* exe_info)
 {
 	struct nn_node *node;
@@ -116,10 +132,19 @@ int do_execute(struct nn_graph *nn, execute_basic_info* exe_info)
 
 	// reset batch sequencing;
 	nn_batchseqstate_before_outer_exec(&nn->batchseq);
-    nn_loopstack_pre_execute( nn, &nn->loopstack);
+	nn_loopstack_pre_execute( nn, &nn->loopstack);
 	do{
 	//print_tensors(inputs, n_inputs);
 	for (node = start_node; node != NULL; node = next_node) {
+		if(nn->deadline_us>0) {
+			uint64_t cur_us = nn_os_get_usecs(nn);
+			if(cur_us > nn->deadline_us){
+				exe_info->result = NN_EXECUTE_MISSED_DEADLINE;
+				err=errlog(nn,"Execute timeout");
+				goto quit;
+			}
+		}
+
 		logmsg(nn,4,"do_execute(): node=%p id=%x, next at %p",node,node->node_id, node->next);
 		//execute_check_src_canaries(nn,node);
 		//execute_set_canaries(nn,node);
@@ -199,3 +224,160 @@ int do_execute(struct nn_graph *nn, execute_basic_info* exe_info)
 	return err;
 }
 
+#else
+
+
+int do_execute(struct nn_graph *nn, execute_basic_info* exe_info)
+{
+	struct nn_node *node;
+	int err = 0;
+	uint64_t perf_start;
+	uint64_t perf_stop;
+	uint64_t pcycle_node;
+	uint64_t pcycle_start;
+	uint64_t pcycle_stop;
+	uint64_t pcycle_overhead;
+	int i;
+	struct nn_node *start_node = nn->head;
+	struct nn_node *next_node = NULL;
+	int saved_priority;
+	uint32_t ordered_priority = nn->priority < 0 ? 2 : (nn->priority > 0 ? 0 : 1);
+	int have_vtcm = 0;
+	if (nn_os_update_main_thread_priority(nn, &saved_priority)) {
+                exe_info->result = NN_EXECUTE_PRIORITY_UPDATE_ERROR;
+                return errlog(nn, "priority update failed");
+        }
+	if (nn->nonconst_head_ptr && *nn->nonconst_head_ptr) start_node = *nn->nonconst_head_ptr;
+	nn_mutex_lock(&nn->graph_specific_mutex);
+#if !defined(V65) && !defined(V66)
+	nn_mutex_lock(&graph_mutex);
+	if(executing_threads == 0){
+		nn_os_hvx_power_on(nn); // THIS MUST BE CALLED WITHIN MUTEX LOCKED SECTION
+	}
+	executing_threads++;
+	nn_mutex_unlock(&graph_mutex);
+#endif
+	nn_mutex_lock(&priority_counts_mutex);
+	for (i = 0; i < ordered_priority; i++) priority_counts[i]++;
+	nn_mutex_unlock(&priority_counts_mutex);
+
+	nn_os_vector_workers_acquire(nn);
+	pcycle_start = nn_os_get_cycles(nn);
+	pcycle_overhead = nn_os_get_cycles(nn) - pcycle_start;
+	for (i = 0; i < ITERS; i++) {
+
+	// reset batch sequencing;
+	nn_batchseqstate_before_outer_exec(&nn->batchseq);
+	nn_loopstack_pre_execute( nn, &nn->loopstack);
+	do{
+	for (node = start_node; node != NULL; node = next_node) {
+		if(nn->deadline_us>0) {
+			uint64_t cur_us = nn_os_get_usecs(nn);
+			if(cur_us > nn->deadline_us){
+				exe_info->result = NN_EXECUTE_MISSED_DEADLINE;
+				err=errlog(nn,"Execute timeout");
+				VTCM_RELEASE
+				goto quit;
+			}
+		}
+		logmsg(nn,4,"do_execute(): node=%p id=%x, next at %p",node,node->node_id, node->next);
+		perf_start = nn_os_get_perfcount(nn);
+		pcycle_node = nn_os_get_cycles(nn);
+		nn_scratch_reset(nn);
+
+		if(!have_vtcm){
+			nn_mutex_lock(&graph_mutex);
+			if (nn_os_vtcm_acquire(nn) != 0) {
+#if !defined(V65) && !defined(V66)
+				executing_threads--;
+				if(executing_threads == 0){
+					nn_os_hvx_power_off(nn); // THIS MUST BE CALLED WITHIN MUTEX LOCKED SECTION
+				}
+#endif
+				nn_mutex_unlock(&graph_mutex);
+				nn_mutex_unlock(&nn->graph_specific_mutex);
+				if (nn_os_restore_main_thread_priority(nn, saved_priority)) errlog(nn, "priority restore failed");
+						exe_info->result = NN_EXECUTE_VTCM_ACQUIRE_ERROR;
+				return errlog(nn,"vtcm acquire error");
+			}
+			have_vtcm = 1;
+		}
+		if ((err = node->ops->execute(node,nn)) != 0) {
+                        exe_info->exe_failure_node_id = node->node_id;
+                        exe_info->exe_failure_node_op_type = node->node_type;
+                        if (node->node_type==NN_OPS_MAX) {
+                                exe_info->result = NN_EXECUTE_UDO_ERROR;
+                        } else if (err==NN_EXECUTE_BUFFER_SIZE_ERROR) {
+                                exe_info->result = err;
+                        } else {
+                                exe_info->result = NN_EXECUTE_ERROR;
+                        }
+			errlog(nn,"execute() failed on node id=%x err=%d",node->node_id,err);
+			VTCM_RELEASE
+			goto quit;
+		}
+		if(ordered_priority < 2 && have_vtcm && priority_counts[ordered_priority] > 0){
+			VTCM_RELEASE
+		}
+		pcycle_stop = nn_os_get_cycles(nn);
+		perf_stop = nn_os_get_perfcount(nn);
+
+		// Print the output tensors, if printing enabled
+#if defined(V66)
+		if (nn->debug_level && nn->enable_tensor_print) {
+			for (int j = 0; j < node->n_outputs; j++) {
+				print_tensor_to_file(nn, node->node_id, j, node->outputs[j]);
+			}
+		}
+#endif
+
+		// show size & checksums of all outputs?
+#if !defined(NN_LOG_MAXLEV) || (NN_LOG_MAXLEV >=2)
+		if( unlikely( nn_option_get(nn,debug_show_output_tensors)))
+			nn_report_node_outputs( nn, 0, node);
+#endif
+		node->perfcounter += (perf_stop - perf_start);
+		node->executions += 1;
+		node->iter_cycles = pcycle_stop - pcycle_node - pcycle_overhead;
+		next_node = node->next;
+		if(next_node == NULL){
+			struct nn_loop_end_action endact = nn_loopstack_post_execute( nn, &nn->loopstack);
+			if( endact.errcode !=0){
+                                exe_info->result = NN_EXECUTE_LOOP_UPDATE_ERROR;
+				err = errlog(nn,"loop update error");
+				VTCM_RELEASE
+				goto quit;
+			}
+			next_node = endact.rerun_node;	// NULL if all done
+		}
+		if(next_node == NULL && have_vtcm){
+			VTCM_RELEASE
+		}
+	} // for node list
+	}while( nn_batchseqstate_loop_update( &nn->batchseq )); // batch seq loop
+	} // for ITERS
+        exe_info->result = NN_EXECUTE_SUCCESS;
+  quit:
+	nn_os_vector_workers_release(nn);
+	nn_mutex_lock(&priority_counts_mutex);
+	for (i = 0; i < ordered_priority; i++) priority_counts[i]--;
+	nn_mutex_unlock(&priority_counts_mutex);
+#if !defined(V65) && !defined(V66)
+	nn_mutex_lock(&graph_mutex);
+	executing_threads--;
+	if(executing_threads == 0){
+		nn_os_hvx_power_off(nn); // THIS MUST BE CALLED WITHIN MUTEX LOCKED SECTION
+	}
+	nn_mutex_unlock(&graph_mutex);
+#endif
+	nn_mutex_unlock(&nn->graph_specific_mutex);
+	if (nn_os_restore_main_thread_priority(nn, saved_priority)) {
+               errlog(nn, "priority restore failed");
+               if (err==0) {
+                       err = -1;
+                       exe_info->result = NN_EXECUTE_PRIORITY_RESTORE_ERROR;
+               }
+        }
+	return err;
+}
+#endif

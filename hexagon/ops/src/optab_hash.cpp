@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -205,7 +205,7 @@ constexpr hashtable HashTable = build_hashtable();
 int op_type_from_string( char const *s )
 {
     unsigned h = s[0];
-    if( h == 0 ) return -1;
+    if( h == 0 ) return errlog(NULL, "string is null in optab_hash()" );
     int c;
     while( (c=*s++) != 0 ){
         h= h*HashTable.hashK + c;
@@ -223,6 +223,6 @@ int op_type_from_string( char const *s )
                 return idx;
         }
     }
-    return -1;
+    return errlog(NULL, "error in op_type_from_string() ");
 }
 

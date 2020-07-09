@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -87,12 +87,12 @@ done:
 
 void nn_logmsg_function(const char *filename, unsigned int line, struct nn_graph *nn, int level, const char *fmt, ...)
 {
-	if ((nn!=NULL) && (level > nn->debug_level)) return;
+	if (((nn!=NULL) && (level > nn->debug_level)) || ((nn == NULL) && (level != 0))) return;
 	char buffer[MAX_STRING_LEN];
 	va_list ap;
 	va_start(ap,fmt);
 	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
-	FARF(ALWAYS,buffer);
+	FARF(ALWAYS," %s :: %d :: %s",filename,line,buffer);
 	if (nn!=NULL) logv(filename,line,nn,level,buffer,ap);
 	va_end(ap);
 }
@@ -104,7 +104,7 @@ int nn_errlog_function(const char *filename, unsigned int line, struct nn_graph 
 	va_list ap;
 	va_start(ap,fmt);
 	vsnprintf(buffer,MAX_STRING_LEN,fmt,ap);
-	FARF(ALWAYS,buffer);
+	FARF(ALWAYS," %s :: %d :: %s ",filename,line,buffer);
 	if (nn!=NULL) logv(filename,line,nn,0,buffer,ap);
 	va_end(ap);
 	return -1;

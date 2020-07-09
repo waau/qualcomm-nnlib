@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -198,7 +198,7 @@ transform_metanode_GL_Lstm( struct nn_graph * nn, struct nn_node ** nodeloc )
 	uint32_t three_nid = create_const_int32_op(nn,3);
 	uint32_t plus8_nid = create_const_float_op(nn,matmul_output_range);
 	uint32_t minus8_nid = create_const_float_op(nn,-matmul_output_range);
-	if(three_nid == 0 || plus8_nid == 0 || minus8_nid == 0) return -1;
+	if(three_nid == 0 || plus8_nid == 0 || minus8_nid == 0) return  errlog(nn, "transform_metanode_GL_Lstm() : three_nid == 0 || plus8_nid == 0 || minus8_nid == 0 ");
 
 	uint32_t concat_nid = 0, fcon_nid =0, lstm_in_nid = 0, lstm_out_nid = 0;
 	//

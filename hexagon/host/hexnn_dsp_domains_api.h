@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -109,5 +109,10 @@ __QAIC_STUB_EXPORT int hexagon_nn_domains_get_nodetype_impl(remote_handle64 _h, 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_multi_execution_cycles_impl(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int* cycles_lo, unsigned int* cycles_hi);
 __QAIC_STUB_EXPORT int hexagon_nn_domains_get_power_impl(remote_handle64 _h, int type);
 __QAIC_STUB_EXPORT int hexagon_nn_domains_set_graph_option_impl(remote_handle64 _h, hexagon_nn_nn_id id, const char* name, int value);
+__QAIC_STUB_EXPORT int hexagon_nn_domains_serialize_size_impl(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int* serialized_obj_size_out, unsigned int* return_code);
+__QAIC_STUB_EXPORT int hexagon_nn_domains_serialize_impl(remote_handle64 _h, hexagon_nn_nn_id id, unsigned char* buffer, int bufferLen, unsigned int* return_code);
+__QAIC_STUB_EXPORT int hexagon_nn_domains_deserialize_impl(remote_handle64 _h, const unsigned char* buffer, int bufferLen, hexagon_nn_nn_id* new_graph_out, unsigned int* return_code);
+__QAIC_STUB_EXPORT int hexagon_nn_domains_execute_with_option_impl(remote_handle64 _h, hexagon_nn_nn_id id,
+        const hexagon_nn_tensordef* inputs, int inputsLen, hexagon_nn_tensordef* outputs, int outputsLen, hexagon_nn_execute_info* execute_info, const hexagon_nn_execute_option *options, int n_options);
 
 #endif //HEXAGON_NN_HEXNN_DSP_DOMAINS_API_H

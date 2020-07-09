@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -328,7 +328,7 @@ int initialize_hash( struct nn_graph *nn)
 		table = (struct lookup_info *) nn->find_node_opaque;
 	}
 	if (table == NULL){
-		if( alloc_table(nn) == NULL ) return -1;
+		if( alloc_table(nn) == NULL ) return errlog(nn, "error in alloc_table()");
 	}else{
 		memset( table->data, 0,table->size *sizeof(*table->data) );
 	}

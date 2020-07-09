@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -117,19 +117,21 @@ set_scaling_parms( struct softmax_scaling_parms * sparms, float inmin, float inm
 	int scexp = flt_getexp( scalep2);
 	int rsh = min_i32(31,7-scexp);
 	if( rsh < 0)
-		return -1;
+		return errlog(NULL, " rsh =%d < 0",rsh);
 	sparms->beta_rsh = rsh;
 	sparms->betamul = saturate_i16( roundf_i32( scalep2 * flt_power2(rsh+8)));
 	int accshift = max_i32(2,32-Q6_R_cl0_R(depth-1));			// ceiling(log2(depth))
 	if( accshift >16)
- 		return -1; // depth must be <= 65536
+ 		return errlog(NULL,"accshift =%d  >16 ",accshift); // depth must be <= 65536
 	sparms->accshift = accshift;
 	return 0;
 }
-// MAX_THREADS can only be 1 or 2.
-// if 2, we split by h
-//
+
+#if defined(HEXAGON_V66)
+#define MAX_THREADS 4
+#else
 #define MAX_THREADS 2
+#endif
 struct softmax_run_state;
 typedef void (*operate_func_fp)( struct softmax_run_state*,uint8_t *, uint8_t const *, int, int16_t *);
 
@@ -570,8 +572,6 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 
 	nn_sem_init( &rstt.done_sem, 0);
 
-	int nthreads = 1;
-	int n_thread_0 = depth_units;		// units done by first thread
 	int job_size_limit = 128*1024;
 	//
 	// 'job_dunits' is the job size in units of depth; each run thread
@@ -601,13 +601,13 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 		if( depth_units < job_dunits || job_dunits * depth > job_size_limit)
 			job_dunits = 1;
 		unsigned job_dunits_bytes = job_dunits * depth;
-		if( job_size_limit >=2*job_dunits_bytes){
+		if( job_size_limit >=MAX_THREADS*job_dunits_bytes){
 			// most we can do in prefetch limit
 			unsigned mul = job_size_limit/job_dunits_bytes;	// >= 2
 			// if that's more than half the work, do half the work instead.
-			if( job_dunits*2*mul > depth_units ){
-				if( depth_units >= 4*job_dunits ){
-					mul = depth_units/(2u*(unsigned)job_dunits);
+			if( job_dunits*MAX_THREADS*mul > depth_units ){
+				if( depth_units >= MAX_THREADS*job_dunits ){
+					mul = depth_units/(MAX_THREADS*(unsigned)job_dunits);
 				}else{
 					mul =1;
 				}
@@ -616,16 +616,9 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 		}
 	}
 	rstt.job_dunits = job_dunits;
-#if MAX_THREADS >= 2
-	if( depth_units > job_dunits){
-		nthreads = 2;
-		unsigned fulljobs = depth_units/(unsigned)job_dunits;
-		unsigned cut = (fulljobs+1)>>1;
-		n_thread_0 = cut * job_dunits;
-	}
-#endif
-	logmsg(nn,2,"thread 0 does %d of %d; thread 1 does %d; chunk size is %d",
-		n_thread_0, depth_units, (depth_units-n_thread_0), job_dunits);
+
+	int nthreads = min_i32(MAX_THREADS, depth_units/(unsigned)job_dunits);
+	if (nthreads == 0) nthreads = 1;
 
 	int16_t * work_buffer = (int16_t*)nn->scratch;
 	if( work_buf_per_thread * nthreads > nn->scratch_size ){
@@ -633,21 +626,27 @@ static int softmax_flat_execute(struct nn_node *self, struct nn_graph *nn)
 			return errlog(nn, "softmax_flat: scratch too small");
 		}
 		nthreads = 1;
-		n_thread_0 = depth_units;
 	}
-	rstt.thrinfo[0].stt = &rstt;
-	rstt.thrinfo[0].workbuf = work_buffer;
-	rstt.thrinfo[0].h0 = 0;
-	rstt.thrinfo[0].hcount = n_thread_0;
-	nn_os_work_for_vector(nn, softmax_flat_run_thread , &rstt.thrinfo[0]);
-	if( nthreads > 1){
-		rstt.thrinfo[1].stt = &rstt;
-		rstt.thrinfo[1].workbuf = work_buffer + work_buf_per_thread;
-		rstt.thrinfo[1].h0 = n_thread_0;
-		rstt.thrinfo[1].hcount = depth_units-n_thread_0;
-		nn_os_work_for_vector(nn, softmax_flat_run_thread , &rstt.thrinfo[1]);
+#if defined(HEXAGON_V66) || defined(HEXAGON_V65)
+	// work on VTCM if possible
+	if (work_buf_per_thread * nthreads <= nn->vtcm_size) {
+		work_buffer = (int16_t*)nn->vtcm_ptr;
 	}
+#endif
+	int depth_units_per_thread = depth_units / nthreads;
+	int depth_units_last_thread = depth_units - depth_units_per_thread*nthreads;
 
+	for( int i =0; i < nthreads; i++){
+		rstt.thrinfo[i].stt = &rstt;
+		rstt.thrinfo[i].workbuf = work_buffer + i*work_buf_per_thread;
+		rstt.thrinfo[i].h0 = i*depth_units_per_thread;
+		rstt.thrinfo[i].hcount = depth_units_per_thread;
+		if (i == nthreads-1) {
+			rstt.thrinfo[i].hcount += depth_units_last_thread;
+		}
+		logmsg(nn,2,"thread %d does [%d - %d]", i, rstt.thrinfo[i].h0, (rstt.thrinfo[i].h0 + rstt.thrinfo[i].hcount - 1));
+		nn_os_work_for_vector(nn, softmax_flat_run_thread , &rstt.thrinfo[i]);
+	}
 
 	for( int i =0; i < nthreads; i++){
 		nn_sem_wait( & rstt.done_sem);
@@ -1806,7 +1805,7 @@ softmax_larged_flat_exec( struct nn_node * self,  struct nn_graph * nn)
 	float beta = (self->n_inputs <4)? 1.0f : tensor_get_float( self->inputs[3],0);
 	float fullscale = beta*(in_max-in_min);
 	if( cache->d2_fullscale != fullscale ){	// rebuild lookup table if needed
-		if( fill_largedepth_lookup(nn, cache, fullscale)!=0) return -1;
+		if( fill_largedepth_lookup(nn, cache, fullscale)!=0) return errlog(nn," error in fill_largedepth_lookup()");
 	}
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &in_tensor->shape, NN_TYPE_QUINT8)!= 0){
 		return errlog(nn,"output too small");

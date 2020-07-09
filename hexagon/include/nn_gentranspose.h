@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -184,7 +184,7 @@ static inline int nn_transpose_analyze( struct nn_transpose_desc * td,
 // this is a dummy until batch scaling is implemented
 static inline int nn_transpose_rescale_for_batches(struct nn_transpose_desc const * td, uint32_t new_batches )
 {
-	return -1;
+	return errlog(NULL,"error in dummy code for batch scaling");
 }
 
 // ********

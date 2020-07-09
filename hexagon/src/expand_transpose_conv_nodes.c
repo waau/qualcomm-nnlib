@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -227,10 +227,15 @@ int expand_transpose_conv_nodes(struct nn_graph *nn, struct nn_node **transpose_
     struct nn_node *bias_min_node = find_node_must_be_Const(nn, transpose_conv_node->input_refs[9].src_id);
     struct nn_node *bias_max_node = find_node_must_be_Const(nn, transpose_conv_node->input_refs[10].src_id);
     if (has_channel_scale) {
-        channel_scale_node = find_node_must_be_Const(nn, transpose_conv_node->input_refs[13].src_id);
+        if (NULL == (channel_scale_node = find_node_must_be_Const(nn, transpose_conv_node->input_refs[13].src_id))) {
+            return errlog(nn, "Error QuantizedTransposeConv2d node_id=%x: Unable to find const channel scale node!", transpose_conv_node->node_id);
+        }
     }
     if (has_groups)    {
-        struct nn_node *group_node = find_node_must_be_Const(nn, transpose_conv_node->input_refs[14].src_id);
+        struct nn_node *group_node;
+        if (NULL == (group_node = find_node_must_be_Const(nn, transpose_conv_node->input_refs[14].src_id))) {
+            return errlog(nn, "Error QuantizedTransposeConv2d node_id=%x: Unable to find const groups node!", transpose_conv_node->node_id);
+        }
         groups = tensor_get_int32(group_node->outputs[0], 0);
     }
 
@@ -255,6 +260,7 @@ int expand_transpose_conv_nodes(struct nn_graph *nn, struct nn_node **transpose_
     uint32_t padded_filt_depth = roundup(filt_depth, groups);
     uint32_t depth_padding = padded_filt_depth - filt_depth;
     pad_num_filters = ((1 < stride_w && stride_w < 5) || stride_w == 8) ? 1 : 0;
+    pad_num_filters = (num_filters < 4 && groups == 1) ? 0 : pad_num_filters; //disable pad num filters if num filters small
     pad_num_filters &= info->allow_num_filter_pad;
     uint32_t padded_num_filters = (pad_num_filters) ? roundup(num_filters, 32) : num_filters;
 

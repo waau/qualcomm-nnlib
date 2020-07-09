@@ -1,4 +1,4 @@
-_TEST_TARGETS:= lint_script 
+_TEST_TARGETS:= lint_script tensor_analyze
 
 .PHONY: $(_TEST_TARGETS)
 
@@ -48,7 +48,15 @@ else
   ifeq (,$(SNPE_TEST))
    ifeq (,$(GOOG_TEST))
     ifeq (,$(CANPHONE))
-     include test/$(V_TARGET).mak
+     ifeq (,$(UDO_SAMPLE_EXE))
+      ifeq (,$(UDO_TEST_SUITE))
+       include test/$(V_TARGET).mak
+      else
+       include udo_tests/$(V_TARGET).mak
+      endif
+     else
+      include udo/$(V_TARGET).mak
+     endif
     else
      include canphone/$(V_TARGET).mak
     endif
@@ -82,9 +90,16 @@ print-%  : ; @echo $* = $($*)
 
 endif #umask
 
+tensor_analyze:
+	time scripts/tensor_analyze.py --compare --yaml /prj/qct/coredev/hexagon/nn_data/TensorPrintSamples/20190625.mobilenet/foobar_graph.yaml --yaml /prj/qct/coredev/hexagon/nn_data/TensorPrintSamples/20190625.mobilenetv65/foobar_graph.yaml > mobilenet.diff
+	diff mobilenet.diff scripts/mobilenet.golden.diff 
+	rm -rf mobilenet.diff
+	time scripts/tensor_analyze.py --compare --dir /prj/qct/coredev/hexagon/nn_data/TensorPrintSamples/20190625.mobilenet.tgz --dir /prj/qct/coredev/hexagon/nn_data/TensorPrintSamples/20190625.mobilenetv65.tgz > mobilenet2.diff
+	diff mobilenet2.diff scripts/mobilenet.golden.diff 
+	rm -rf mobilenet2.diff
 
 lint_script:
-	time /prj/qct/coredev/hexagon/sitelinks/arch/pkg/python3/x86_64/3.4.2/bin/pylint --extension-pkg-whitelist=numpy -E ./scripts/tensor_compare.py
+	time /prj/qct/coredev/hexagon/sitelinks/arch/pkg/python3/x86_64/3.4.2/bin/pylint --extension-pkg-whitelist=numpy -E ./scripts/tensor_analyze.py
 
 test: $(_TEST_TARGETS)
 	echo PASSED ALL TESTS!

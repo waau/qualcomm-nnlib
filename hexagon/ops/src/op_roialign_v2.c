@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -135,6 +135,7 @@ static void doRoiAlignBatch_hvx(struct nn_graph *nn, const int n_rois, const int
 {
 	uint8_t *out_data = out_tensor->data;
 	uint8_t *feat_data = feat_tensor->data;
+	const int32_t feat_batches = feat_tensor->shape.batches;
 	const int32_t feat_height = feat_tensor->shape.height;
 	const int32_t feat_width = feat_tensor->shape.width;
 	const int32_t feat_depth = feat_tensor->shape.depth;
@@ -159,8 +160,8 @@ static void doRoiAlignBatch_hvx(struct nn_graph *nn, const int n_rois, const int
 			float roi_end_w = (float)((uint16_t *)rois_tensor->data)[offset + 2] * spatial_w_scale * 0.125f;
 			float roi_end_h = (float)((uint16_t *)rois_tensor->data)[offset + 3] * spatial_h_scale * 0.125f;
 
-			if (roi_batch_ind < 0 || roi_batch_ind >= n_rois || roi_start_w > feat_width || roi_end_w > feat_width ||
-				roi_start_h > feat_height || roi_start_h > feat_height || roi_start_w > roi_end_w || roi_start_h > roi_start_h)
+			if (roi_batch_ind < 0 || roi_batch_ind >= feat_batches || roi_start_w > feat_width || roi_end_w > feat_width ||
+				roi_start_h > feat_height || roi_end_h > feat_height || roi_start_w > roi_end_w || roi_start_h > roi_end_h)
 			{
 				errlog(nn, "invalid input data");
 				return;

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -598,6 +598,17 @@ vmemcpy_2d_general_asm:
 		r19:18 = combine(r5,r3)		// save row pitches
 		r21 = asr( r21, r6)			// height for the 1st operation
 	}
+#if __HEXAGON_ARCH__ >= 62
+	{
+		// if the 'width' <=256, we can use the short vmemcpy; this is a good choice
+		// if r26 (the the number of slices) is more than 2, and r21 (the number of rows per
+		/// slice) is not more than 4.
+		p0 = !cmp.gt(r0,#256)
+		p0 = cmp.gt(r26,#2)
+		p0 = !cmp.gt(r21, #4)
+		if( p0.new ) jump:nt .L_go_use_short_copy  // jump if all three true
+	}
+#endif
 	//  r26 = # of loops to do (>= 1)
 	// r20..r25 = values for r0..5 for next call
 	// r27 = loop count at which 'height' (r21) needs to be 1 less
@@ -635,7 +646,7 @@ vmemcpy_2d_general_asm:
 		dealloc_return
 	}
 .L_jjtoit:
-  /// call becomes a single call to hvx_rectangle_copy_FUNCNAME if the
+  /// call becomes a single call to vmemcpy_2d_asm if the
   // row pitches are aligned, or if ht <= 1.
   // undo the 'allocframe' we started...
   // and just go to  hvx_rectangle_copy
@@ -644,6 +655,27 @@ vmemcpy_2d_general_asm:
   	 	fp = r7;
         jump  vmemcpy_2d_asm
     }
+#if __HEXAGON_ARCH__ >= 62
+// for some cases,
+// use the 'vmemcpy_2d_short' instead. We haven't clobbered any of r0..r5
+// (and r7 still contains fp) so just restore the call-saved regs and jump to it
+    .balign 16
+.L_go_use_short_copy:
+	{
+		r21:20=memd(sp+#0)
+		r23:22=memd(sp+#8)
+	}
+	{
+		r25:24 = memd(sp+#16)
+		r27:26 = memd(sp+#24)
+	}
+	{
+		r19:18 = memd(sp+#32)
+		sp = add(fp,#8)
+		fp = r7
+		jump  vmemcpy_2d_short_general
+	}
+#endif
 
 
  .LtmpY:

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -87,10 +87,11 @@ int main(int argc, char* argv[])
 
         uint8_t i [] = {2,3,4,5,6,7};  // input
         uint8_t r [] = {6,7,8,9,10,11};  // expected result
+
         char udoPackageName1[] = "udoExampleLib";
         char udoOpType1[] = "opUdoPlusOne";
         char udoOpType2[] = "opUdoPlusStat";
-
+        uint32_t udo_lib_registration_id1 = 0;
         SnpeUdo_Param_t staticParam1;
         char udoStaticName1[] = "plusTwo";
         staticParam1.paramType = SNPE_UDO_PARAMTYPE_SCALAR;
@@ -119,7 +120,7 @@ int main(int argc, char* argv[])
 
 	RUN_HEXNN_API(result, hexagon_nn_config());
 
-	RUN_HEXNN_API(result, hexagon_nn_udo_register_lib("/udoLibs/udoExampleImplLib.so", &udoRes));
+	RUN_HEXNN_API(result, hexagon_nn_register_udo_lib("/udoLibs/udoExampleImplLib.so", &udo_lib_registration_id1, &udoRes));
         CHECK_UDO_RES(udoRes, reg_lib_1);
 
 	RUN_HEXNN_API(result, hexagon_nn_init(&nnid));
@@ -268,7 +269,7 @@ int main(int argc, char* argv[])
 exit:
 	if(nnid != 0)  RUN_HEXNN_API_EXIT(result, hexagon_nn_teardown(nnid));
         // option 1: free udo libs individually
-        RUN_HEXNN_API_EXIT(result, hexagon_nn_free_udo_individual_lib(udoPackageName1, &udoRes));
+        RUN_HEXNN_API_EXIT(result, hexagon_nn_free_udo_individual_lib(udo_lib_registration_id1, &udoRes));
         if(udoRes!=UDO_SUCCESS){
                 errorCodeFail(__FILE__, __LINE__, "free_udo_individual_lib", udoRes);
         }

@@ -487,7 +487,7 @@ static int dwise_supernode_recalculate_strategy(struct nn_node *self, struct nn_
 	// find input range, output scaling and limits
 	// Note: may expand the output range
 
-	if( fill_info_minmax_basics(nn,self,info) !=0 ) return -1;
+	if( fill_info_minmax_basics(nn,self,info) !=0 ) return errlog(nn,"error in fill_info_minmax_basics() ");
 	logmsg(nn,1,"out_maxval=%f out_minval=%f in_max_float=%f in_min_float=%f in_level_size=%f filt_level_size=%f prod_level_size=%f max_valid_val=%d",
 			info->out_maxval,info->out_minval,info->in_max_float,info->in_min_float,info->prod_level_size/info->weights_level_size,
 			info->weights_level_size,info->prod_level_size,info->max_valid_val);
@@ -797,7 +797,7 @@ static int dwise_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	// check if we have a channel-scaling input (#12)
 	float const *channel_scale_flts = NULL;
 	if( check_channelscale_present(nn,self, out_depth_non_padded, &channel_scale_flts)!=0)
-		return -1;
+		return  errlog(nn," error in check_channelscale_present()");
 
 	if ((info->weights = nn_memalign(128,weights_size)) == NULL) {
 		nn_free(info);

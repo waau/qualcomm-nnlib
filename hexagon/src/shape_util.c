@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -121,7 +121,7 @@ static inline void
 	__sync_or_and_fetch(&mcm->ready_set, slotinfo.slot_bit);
 
 	// if too many pending, wait.
-	while (mcm->pending >= NN_MEMCPY_MANAGER_MAX_THREADS)
+	while (mcm->pending >= nn->num_vector_threads)
 	{
 		nn_sem_wait(&mcm->done_sem);
 		mcm->pending--;
@@ -246,7 +246,7 @@ int nn_mcmanager_tensor_copy(struct nn_graph *nn, struct nn_memcpy_manager *mcm,
 {
 	unsigned copy_len = src->data_size;
 	if (copy_len > dst->max_size)
-		return -1;
+		return errlog(nn,"src data size is greater than dst max size ");
 
 	if (copy_len > 0 && dst->data != src->data)
 		nn_mcmanager_vmemcpy(nn, mcm, dst->data, src->data, copy_len);
@@ -337,6 +337,19 @@ void vmemcpy_2d_general_with_prefetch(int width, int height,
 	int Kshift = 7 - Q6_R_ct0_R((unsigned)d_stride | s_stride | 128);
 	int K = 1 << Kshift;
 	int npasses = min_i32(K, height); // this is the # of passes we need.
+#if  __HEXAGON_ARCH__ >= 62
+	// do we want to use vmemcpy_2d_short?
+	if (width <= 256		// requirement, to use the short vmemcpy
+			&& npasses > 2 && height < 4*npasses){ //  probably better to use the short vmemcpy
+		if (s_stride < 0x10000) {
+			l2fetch(src, s_stride, width, height);
+		}
+		vmemcpy_2d_short_general( width, height, dst, d_stride, src, s_stride);
+		return;
+	}
+#endif
+
+
 	uint8_t *dstp = (uint8_t *)dst;
 	uint8_t const *srcp = (uint8_t *)src;
 	unsigned src_aligned_stride = s_stride << Kshift;
@@ -550,7 +563,7 @@ int find_concat_shape(
 	uint32_t anydel_width = 0, anydel_depth = 0;
 	uint32_t sum_del = 0;
 	if (!(concat_dim >= 0 && concat_dim <= 3))
-		return -1;
+		return errlog(NULL," concat_dim is not in range ");
 
 	// for all the others:
 	//  find  del_XX = XX - ref_XX (mod uint32)
@@ -1269,7 +1282,7 @@ int nn_generic_unary_float_op(struct nn_node *self, struct nn_graph *nn,
 int tensor_slice_from_tensor_d32(struct tensor_slice_d32 *slc, const struct tensor *tens)
 {
 	if (!tensor_is_d32(tens))
-		return -1;
+		return errlog(NULL, "tensor is not of type d32");
 	slc->shape = tens->shape;
 	int32_t depth_total = tensor_d_total_d32(tens);
 	int32_t depth_pad_before = tens->format.depth_pad[0];
@@ -1351,7 +1364,7 @@ int tensor_slice_on_dimension(
 		return 0;
 
 	default:
-		return -1;
+		return errlog(NULL, "bad dim num ,  dim_no= %d ",dim_no);
 	}
 	// generic slicing along batch, height, width dims.
 	if (*nsize_p < (unsigned)min_curr_size)
@@ -1458,7 +1471,7 @@ int tensor_slice_progressive_d32(
 	}
 	break;
 	default:
-		return -1;
+		return errlog(NULL, "Slice dim out of range.");
 	}
 
 	next_slicepos = slicepos + new_dimsize;

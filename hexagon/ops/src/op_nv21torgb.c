@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (mulject to the limitations in the
@@ -43,12 +43,28 @@
 #include <math.h>
 #include <quantize.h>
 
+#ifdef HEXAGON_V66
+#define NUM_THREADS 4
+#else
+#define NUM_THREADS 2
+#endif
 
 // TODO: Get these into some shareable place.
 // Currently we have a copy here and also one in SNPE DSP code
 #define OP_NV21TORGB_INPUT_DATA_IDX 0
 #define OP_NV21TORGB_ISBGR_IDX 1
 #define OP_NV21TORGB_NUM_OPS 2
+
+struct worker_info {
+    uint8_t* input;
+    uint8_t* output;
+    size_t height;
+    size_t width;
+    size_t depth;
+    uint32_t isBGR;
+    size_t n;
+    nn_sem_t donesem;
+};
 
 #if defined(__hexagon__)
 static int32_t min(int32_t a, int32_t b) { return ((a < b) ? a : b); }
@@ -119,6 +135,52 @@ static void YuvToBgr_op8
     *bgr = r;
 }
 
+static void nv21_to_rgb_convert(struct nn_graph *nn, void *worker_info)
+{
+    struct worker_info *info = (struct worker_info *)worker_info;
+    const size_t oWidth = info->width;
+    const size_t oHeight = info->height;
+    const size_t oDepth = info->depth;
+    uint32_t isBGR = info->isBGR;
+
+    size_t uvoffset = oWidth*oHeight;
+    uint8_t u, v, y1, y2, y3, y4;
+
+    uint8_t * currentInput = info->input;
+    uint8_t * currentOutput = info->output;
+
+    size_t n;
+
+    while ((n = __sync_fetch_and_add(&info->n, 2)), n < oHeight)
+    {
+        for(size_t i=n*oWidth, k=n*oWidth/2; (i-n*oWidth) < oWidth; i+=2, k+=2)
+        {
+            y1 = *(currentInput+ i);
+            y2 = *(currentInput+ i + 1);
+            y3 = *(currentInput+ oWidth + i);
+            y4 = *(currentInput+ oWidth + i + 1);
+            v = *(currentInput+ uvoffset + k);
+            u = *(currentInput+ uvoffset + k + 1);
+
+            if( !isBGR )
+            {
+                YuvToRgb_op8(y1, u, v, currentOutput + i*oDepth);
+                YuvToRgb_op8(y2, u, v, currentOutput + (i+1)*oDepth);
+                YuvToRgb_op8(y3, u, v, currentOutput + (oWidth+i)*oDepth);
+                YuvToRgb_op8(y4, u, v, currentOutput + (oWidth+i+1)*oDepth);
+            }
+            else
+            {
+                YuvToBgr_op8(y1, u, v, currentOutput + i*oDepth);
+                YuvToBgr_op8(y2, u, v, currentOutput + (i+1)*oDepth);
+                YuvToBgr_op8(y3, u, v, currentOutput + (oWidth+i)*oDepth);
+                YuvToBgr_op8(y4, u, v, currentOutput + (oWidth+i+1)*oDepth);
+            }
+        }
+    }
+    nn_sem_post(&info->donesem);
+}
+
 static int nv21_to_rgb_execute(struct nn_node *self, struct nn_graph *nn) {
 
     const struct tensor *in_tensor = self->inputs[OP_NV21TORGB_INPUT_DATA_IDX];
@@ -158,45 +220,24 @@ static int nv21_to_rgb_execute(struct nn_node *self, struct nn_graph *nn) {
     size_t yuvDataSize = (yDataSize*3)/2;
     size_t rgbDataSize = yDataSize * RGB_CHANNEL_DEPTH;
 
-    size_t uvoffset = yDataSize;
-    uint8_t u, v, y1, y2, y3, y4;
-
-    uint8_t * currentInput;
-    uint8_t * currentOutput;
+    int n_threads = min_i32(NUM_THREADS, oHeight/2);
+    struct worker_info info;
+    info.height = oHeight;
+    info.width = oWidth;
+    info.depth = oDepth;
+    info.isBGR = isBGR;
 
     // Unroll the loop by 2 step yDataSize along the horizontal and
     // vertical dimension.
     for (int b = 0; b < oBatch; b++)
     {
-        currentInput = input + b * yuvDataSize;
-        currentOutput = output + b * rgbDataSize;
-        for(size_t i=0, k=0; i < yDataSize; i+=2, k+=2)
-        {
-            y1 = *(currentInput+ i);
-            y2 = *(currentInput+ i + 1);
-            y3 = *(currentInput+ oWidth + i);
-            y4 = *(currentInput+ oWidth + i + 1);
-            v = *(currentInput+ uvoffset + k);
-            u = *(currentInput+ uvoffset + k + 1);
-
-            if( !isBGR )
-            {
-                YuvToRgb_op8(y1, u, v, currentOutput + i*oDepth);
-                YuvToRgb_op8(y2, u, v, currentOutput + (i+1)*oDepth);
-                YuvToRgb_op8(y3, u, v, currentOutput + (oWidth+i)*oDepth);
-                YuvToRgb_op8(y4, u, v, currentOutput + (oWidth+i+1)*oDepth);
-            }
-            else
-            {
-                YuvToBgr_op8(y1, u, v, currentOutput + i*oDepth);
-                YuvToBgr_op8(y2, u, v, currentOutput + (i+1)*oDepth);
-                YuvToBgr_op8(y3, u, v, currentOutput + (oWidth+i)*oDepth);
-                YuvToBgr_op8(y4, u, v, currentOutput + (oWidth+i+1)*oDepth);
-            }
-
-            if((i+2)%oWidth==0)
-                i+=oWidth;
-        }
+        info.input = input + b * yuvDataSize;
+        info.output = output + b * rgbDataSize;
+        info.n = 0;
+        nn_sem_init(&info.donesem, 0);
+        for (int i = 0; i < n_threads; i++)
+            nn_os_work_for_vector(nn, nv21_to_rgb_convert, &info);
+        nn_sem_wait_n_times(&info.donesem, n_threads);
     }
 
     return 0;

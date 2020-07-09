@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -189,7 +189,7 @@ find_row_with_instride( struct nn_transpose_desc * tdp, int needed_stride, int r
 	for( int i =row0; i < nrows; i++){
 		if( tdp->table[i].in_stride == needed_stride ) return i;
 	}
-	return -1;
+	return errlog(NULL," error in find_row_with_instride() ");
 }
 
 // this does 2 things:
@@ -206,9 +206,9 @@ int nn_transpose_check(int32_t const* perm_arr, int permn,
 	unsigned dimset = 0;
 	for( int i =0 ; i < permn; i++){
 		int k = perm_arr[i];
-		if( (unsigned)k >= (unsigned)permn) return -1;		// is ok
+		if( (unsigned)k >= (unsigned)permn) return errlog(NULL, "nn_transpose_check() permutation is invalid");		// is ok
 		unsigned m = 1 << k;
-		if( dimset & m) return -1;		// seen it before
+		if( dimset & m) return errlog(NULL, "nn_transpose_check() permutation is invalid. Contains repeat dimension");		// seen it before
 		dimset |= m;
 		out_shape->dimension[4-permn+i] = in_shape->dimension[4-permn+k];
 	}
@@ -237,12 +237,12 @@ int nn_transpose_analyze_direct( struct nn_transpose_desc * tdp,
 	// start by ignoring any outer dims == 1.
 	// but not if they might be involved in the permutation.
 	
-	if( permn < 0 || permn > ndim) return -1;	// => ndim >=0
+	if( permn < 0 || permn > ndim) return errlog(NULL, "number of dimensions to permute is invalid");	// => ndim >=0
 	while( ndim > permn && dims[0] <=1){
 		++dims; --ndim;
 	}
 	// maybe ndims = 0 now (a scalar).
-	if( ndim >NN_TRANSPOSE_MAX_ORIG_DIMS ) return -1;		// protect memory
+	if( ndim >NN_TRANSPOSE_MAX_ORIG_DIMS ) return errlog(NULL, " ndim >NN_TRANSPOSE_MAX_ORIG_DIMS ");		// protect memory
 	int nrows = ndim+1;		// dimensions in the table
 
 	tdp->buffer_needed = 0;
@@ -342,7 +342,7 @@ int nn_transpose_analyze_direct( struct nn_transpose_desc * tdp,
 	// a 6-dim transpose, but the 'D' dim will crush into the element row, and there will be an outer 'B' dim that
 	// we just removed).
 	//
-	if( nrows >5) return -1;
+	if( nrows >5) return errlog(NULL, "cannot transpose on more than 5 dims" );
 
 	// now, choose a strategy. we can also reorder the rows in the table --  provided we don't move
 	// the first one -- to e.g. give higher counts to outer loops. We can also insert dims to make some

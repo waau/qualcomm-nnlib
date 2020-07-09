@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -211,6 +211,8 @@ struct hvx_info {
 	int a_const_value;
 	int b_const_value;
 	int elements;
+	int use_a_const;
+	int use_b_const;
 };
 
 /* Look for patterns to use HVX intrinsics version of the code and broadcast/prepare the data */

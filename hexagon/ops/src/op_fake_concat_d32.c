@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -57,7 +57,7 @@ static int fake_concat_check(struct nn_node *self, struct nn_graph *nn)
 	}
 	/* Probably should check some other stuff here */
 	int n_inputs = (self->n_inputs - 1) / 3;
-	if( self->n_inputs != 3*n_inputs+1){
+	if( self->n_inputs != 3*n_inputs+1 && self->n_inputs != 3*n_inputs+3){
 		return errlog(nn,"bad input count");
 	}
 	int i;

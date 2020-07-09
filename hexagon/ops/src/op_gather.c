@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -425,7 +425,7 @@ gather_execute( struct nn_node *self, struct nn_graph *nn)
 	rstate.opp.elbytes = elbytes;
 
 	if( analyze_gather_op( nn, index_tensor, table_tensor, &rstate.opp, index_dim, index_rank)!= 0)
-		return -1;
+		return errlog(nn," error in analyze_gather_op() ");
 	// create the output tensor
 	if( tensor_out_prepare_normal_fromshape( out_tensor, &rstate.opp.outshape, data_type) != 0 ){
 		return errlog(nn, "output too small");
@@ -763,7 +763,7 @@ table_execute( struct nn_node *self, struct nn_graph *nn)
 	// work out all the details
 
 	if( analyze_table_op( nn, index_tensor, table_tensor, layout_tensor, &rstate.opp)!= 0)
-		return -1;
+		return errlog(nn,"error in analyze_table_op()");
 
 	// extract scalar parms where available
 	int partn_strategy = 0;

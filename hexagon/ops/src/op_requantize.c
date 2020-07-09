@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -34,9 +34,9 @@
  *
  */
 /*
- * 
+ *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This contains implementations for requantizing
  */
 
@@ -64,6 +64,7 @@ struct requant_runstate
     int32_t in_offset;
     int32_t out_offset;
     nn_sem_t done_sem;
+    int num_threads;
 };
 
 struct requant_d32_runstate
@@ -80,6 +81,7 @@ struct requant_d32_runstate
     int32_t in_offset;
     int32_t out_offset;
     nn_sem_t done_sem;
+    int num_threads;
 };
 
 // find the min/max of all values in arr[0..n]
@@ -369,29 +371,31 @@ static int do_requantize_8to8_execute(struct nn_node *self, struct nn_graph *nn)
         return errlog(nn, "Requantize_8to8: Out range too small compared to in range!");
     }
 
-    struct requant_runstate rstate;
-    rstate.inp = in_data;
-    rstate.outp = out_data;
-    rstate.n_elem = n_elements;
-    rstate.gain = gain;
-    rstate.in_offset = in_offset;
-    rstate.out_offset = out_offset;
-    nn_sem_init(&rstate.done_sem, 0);
+    if(NULL == self->opaque)
+    {
+        return errlog(nn, "Requantize_8to8: zero pointer detected!");
+    }
+    struct requant_runstate *rstate = self->opaque;
+    rstate->inp = in_data;
+    rstate->outp = out_data;
+    rstate->n_elem = n_elements;
+    rstate->gain = gain;
+    rstate->in_offset = in_offset;
+    rstate->out_offset = out_offset;
+    nn_sem_init(&rstate->done_sem, 0);
 
     unsigned n_vectors = (n_elements + 127) / 128u;
     unsigned chunk = 256;
     if(n_vectors < 512) {
         chunk = (n_vectors < 32) ? n_vectors : ((n_vectors + 1) >> 1);
     }
-    rstate.chunk = 128 * chunk;
-    rstate.current_pos = 0;
-    int n_threads = (n_vectors > (NUM_THREADS - 1) * chunk) ? NUM_THREADS : (n_vectors + (chunk - 1)) / chunk;
+    rstate->chunk = 128 * chunk;
+    rstate->current_pos = 0;
+    rstate->num_threads = (n_vectors > (NUM_THREADS - 1) * chunk) ? NUM_THREADS : (n_vectors + (chunk - 1)) / chunk;
 
-    for(int i = 0; i < n_threads; i++) {
-        nn_os_work_for_vector(nn, requantize_hvx_work_func, &rstate);
+    for(int i = 0; i < rstate->num_threads; i++) {
+        nn_os_work_for_vector(nn, requantize_hvx_work_func, rstate);
     }
-
-    nn_sem_wait_n_times(&rstate.done_sem, n_threads);
 
     return 0;
 }
@@ -460,20 +464,24 @@ static int do_requantize_8to8_execute_d32(struct nn_node *self, struct nn_graph 
     tin.data -= data_offset;
     tout.data -= data_offset;
 
-    struct requant_d32_runstate rstate = {
-        .opshape = in_tensor->shape,
-        .tin = tin,
-        .tout = tout,
-        .d32_iters = (w_total - wskip) / 4u,
-        .next_work = 0,
-        .in_offset = in_offset,
-        .out_offset = out_offset,
-        .gain = gain
-    };
+    if(NULL == self->opaque)
+    {
+        return errlog(nn, "Requantize_8to8: zero pointer detected!");
+    }
 
-    nn_sem_init(&rstate.done_sem, 0);
+    struct requant_d32_runstate *rstate = self->opaque;
+    rstate->opshape = in_tensor->shape;
+    rstate->tin = tin;
+    rstate->tout = tout;
+    rstate->d32_iters = (w_total - wskip) / 4u;
+    rstate->next_work = 0;
+    rstate->in_offset = in_offset;
+    rstate->out_offset = out_offset;
+    rstate->gain = gain;
 
-    unsigned row_work = rstate.d32_iters * tin.nd32;
+    nn_sem_init(&rstate->done_sem, 0);
+
+    unsigned row_work = rstate->d32_iters * tin.nd32;
     int h_chunk = (row_work >= 1024) ? 1 : (1024 >> floor_log2(row_work));
     if(h_chunk >= h)
     {
@@ -498,17 +506,15 @@ static int do_requantize_8to8_execute_d32(struct nn_node *self, struct nn_graph 
         }
     }
 
-    rstate.h_per_slice = h_chunk;
-    rstate.slice_per_batch = slice_per_batch;
-    rstate.work_units = b * slice_per_batch;
+    rstate->h_per_slice = h_chunk;
+    rstate->slice_per_batch = slice_per_batch;
+    rstate->work_units = b * slice_per_batch;
 
-    int n_threads = min_i32(rstate.work_units, NUM_THREADS);
-    for(int i = 0; i < n_threads; i++)
+    rstate->num_threads = min_i32(rstate->work_units, NUM_THREADS);
+    for(int i = 0; i < rstate->num_threads; i++)
     {
-        nn_os_work_for_vector(nn, requantize_d32_hvx_work_func, &rstate);
+        nn_os_work_for_vector(nn, requantize_d32_hvx_work_func, rstate);
     }
-
-    nn_sem_wait_n_times(&rstate.done_sem, n_threads);
 
     return 0;
 }
@@ -805,7 +811,7 @@ void worker(struct nn_graph *nn, void *vtdata)
 	nn_sem_post(&td->donesem);
 }
 
-int launcher(struct nn_node *self, struct nn_graph *nn, 
+int launcher(struct nn_node *self, struct nn_graph *nn,
 	int (*f)(struct nn_node *self, struct nn_graph *nn))
 {
 	struct tdata td = {
@@ -826,12 +832,31 @@ static int requantize_execute(struct nn_node *self, struct nn_graph *nn)
 
 static int requantize_8to8_execute(struct nn_node *self, struct nn_graph *nn)
 {
-    return launcher(self, nn, do_requantize_8to8_execute);
+    struct requant_runstate rstate;
+    int rc;
+
+    self->opaque = &rstate;
+    rc = launcher(self, nn, do_requantize_8to8_execute);
+
+    self->opaque = NULL;
+
+    nn_sem_wait_n_times(&rstate.done_sem, rstate.num_threads);
+
+    return rc;
 }
 
 static int requantize_8to8_execute_d32(struct nn_node *self, struct nn_graph *nn)
 {
-    return launcher(self, nn, do_requantize_8to8_execute_d32);
+    struct requant_d32_runstate rstate;
+    int rc;
+
+    self->opaque = &rstate;
+    rc = launcher(self, nn, do_requantize_8to8_execute_d32);
+    self->opaque = NULL;
+
+    nn_sem_wait_n_times(&rstate.done_sem, rstate.num_threads);
+
+    return rc;
 }
 
 static int requantrange_execute(struct nn_node *self, struct nn_graph *nn)
@@ -1010,7 +1035,8 @@ struct nn_node_ops nn_ops_for_Requantize_8to8 = {
     .ctor = node_alloc_common,
     .dtor = node_free_common,
     .n_inputs = NN_IOCOUNT(5),
-    .n_outputs = NN_IOCOUNT(3)
+    .n_outputs = NN_IOCOUNT(3),
+    .flags = NN_NODE_FLAG_CLS_REQUANT8,
 };
 
 struct nn_node_ops nn_ops_for_Requantize_8to8_d32 = {

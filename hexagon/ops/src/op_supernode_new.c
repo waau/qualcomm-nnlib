@@ -59,6 +59,7 @@
 #include "hvx_hexagon_protos.h"
 
 #include "nn_bufferpool.h"
+#include "nn_graph_log.h"
 
 #ifdef HEXAGON_V66
 #define NUM_THREADS 4
@@ -3100,7 +3101,7 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 
 	// Note: this may expand the output range
 	if(  fill_info_minmax_basics(nn,self,info) != 0 )
-		return -1;
+		return errlog(nn,"error in fill_info_minmax_basics() ");
 	//fill_info_dim_basics(nn,self,info);
 	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%f maxvalid ~= %d",
 		info->out_maxval,
@@ -3121,7 +3122,7 @@ int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
         if (!info->use_v65 && filt_height==1 && filt_width==1 && ENABLE_FASTSUMA_1x1) bias_extra = info->in_depth*input_offset*filt_offset;
 	logmsg(nn,2,"in_depth_total=%d input_offset=%d filt_offset=%d bias_extra=%d",in_depth_total,input_offset,filt_offset,bias_extra);
 	if (fill_bias_buf(nn,self,info,bias32,bias_extra) != 0)
-		return -1;
+		return errlog(nn," error in fill_bias_buf() ");
 
 	/*
 	 * Prepare output tensors
@@ -4001,7 +4002,7 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 	info->filt_height = filt_height;
 
 	// Note: this may expand the output range
-	if (fill_info_minmax_basics(nn,self,info) != 0) return -1;
+	if (fill_info_minmax_basics(nn,self,info) != 0) return errlog(nn,"error in fill_info_minmax_basics() ");
 	//fill_info_dim_basics(nn,self,info);
 	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%f maxvalid ~= %d",
 		info->out_maxval,
@@ -4022,7 +4023,7 @@ int supernode_recalculate_strategy_v66(struct nn_node *self, struct nn_graph *nn
 
 	logmsg(nn,2,"in_depth_total=%d input_offset=%d filt_offset=%d bias_extra=%d",in_depth_total,input_offset,filt_offset,bias_extra);
 	if (fill_bias_buf(nn,self,info,bias32,bias_extra) != 0)
-		return -1;
+		return errlog(nn,"error in fill_bias_buf()");
 
 	/* 
 	 * Recompute weights
@@ -4632,7 +4633,7 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 	// check if we have a channel-scaling input (#12)
 	float const *channel_scale_flts = NULL;
 	if( check_channelscale_present(nn,self, filt_batches, &channel_scale_flts)!=0)
-		return -1;
+		return errlog(nn, "error in check_channelscale_present() ");
 
 	if ((info = nn_calloc(1,sizeof(*info))) == NULL) {
 		return errlog(nn,"couldn't allocate info");
@@ -4789,7 +4790,7 @@ int supernode_check(struct nn_node *self, struct nn_graph *nn)
 	logmsg(nn,2,"stride_width=%d in_right_padpad=%d",stride_width,info->in_right_padpad);
 
 	nn_sem_init(&info->alldone_sem,0);
-	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return -1;
+	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return errlog(nn, " error in setup_initial_output_range()");
 
 	return 0;
 
@@ -5440,7 +5441,7 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 
 	// find input range, output scaling & range
 	// Note: this may expand the output range
-	if( fill_info_minmax_basics(nn,self,info) != 0) return -1;
+	if( fill_info_minmax_basics(nn,self,info) != 0) return errlog(NULL, "error in fill_info_minmax_basics()");
 
 	//float bias_to_prod_ratio = (bias_level_size / prod_level_size);
 	float min_out_prod_offset;
@@ -5484,7 +5485,7 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	 */
 	int bias32 = (self->node_type == OP_InputSupernode_8x8p32to8_outd32);
 	if (fill_bias_buf(nn,self,info,bias32,0) != 0)
-		return -1;
+		return errlog(nn, "error in fill_bias_buf()");
 
 	nn_sem_t donesem;
 
@@ -5771,7 +5772,7 @@ static int shortin_supernode_check(struct nn_node *self, struct nn_graph *nn)
 	info->weight_batch_size = weight_batch_size;
 	self->opaque = info;
 
-	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, -1.0f/128, 1.0f/128)) return -1;
+	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, -1.0f/128, 1.0f/128)) return errlog(nn,"error in setup_initial_output_range()");
 
 	return 0;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -315,6 +315,7 @@ static int multiclassnms_8_execute(struct nn_node *self, struct nn_graph *nn) {
     uint32_t *validnum = (uint32_t *)((uint8_t *)filtered_boxes_hashtable + filtered_boxes_hashtable_size);
     uint16_t *validclassidx = (uint16_t *)((uint8_t *)validnum + validnum_size);
     struct validscore_job *validation_job = (struct validscore_job *)((uint8_t *)validclassidx + validclassidx_size);
+    uint32_t scores_validated = 0;
 #endif
 
     size_t box_record_idx = 0;                                                                   //box record array tail index
@@ -328,52 +329,59 @@ static int multiclassnms_8_execute(struct nn_node *self, struct nn_graph *nn) {
         box_scores_tensor = input_scores_tensor_data + input_scores_tensor_offset;
 
 #if defined(HEXAGON_V65) || defined(HEXAGON_V66)
-        uint32_t *output_validnum = validnum;
-        uint16_t *output_validclassidx = validclassidx;
-        struct validscore_job *job = validation_job;
-        for (size_t i = 0; i < input_boxes_count; i++, job++) {
-            job->in_data = box_scores_tensor;
-            job->valid_num = output_validnum++;
-            job->valid_classidx = output_validclassidx;
-            box_scores_tensor += input_scores_classes_count;
-            output_validclassidx += input_scores_classes_count;
-        }
+        // We only use this score validation algorithm if we get real VTCM.  It won't work
+        // on fake VTCM since it uses instructions that require real VTCM
+        if (nn->vtcm_is_real) {
+            scores_validated = 1;
+            uint32_t *output_validnum = validnum;
+            uint16_t *output_validclassidx = validclassidx;
+            struct validscore_job *job = validation_job;
+            for (size_t i = 0; i < input_boxes_count; i++, job++) {
+                job->in_data = box_scores_tensor;
+                job->valid_num = output_validnum++;
+                job->valid_classidx = output_validclassidx;
+                box_scores_tensor += input_scores_classes_count;
+                output_validclassidx += input_scores_classes_count;
+            }
 
-        if (input_scores_classes_count == 0) {
-            return errlog(nn,"multiclassnms the class count of input scores per box is zero\n");
-        }
-        if (score_threshold == 0) {
+            if (input_scores_classes_count == 0) {
+                return errlog(nn,"multiclassnms the class count of input scores per box is zero\n");
+            }
+            if (score_threshold == 0) {
             // the score threshold (score_threshold-1) used to do comparison (>) has to be >= 0
-            score_threshold = 1;
-        }
-        struct general_info basic_info;
-        // because cmp.gt is >, not >=. take quantized scorethreshold -1 as threshold in comparison
-        basic_info.score_cmpthreshold = score_threshold - 1;
-        basic_info.round_classes_count = input_scores_classes_count / HVX_SIZE * HVX_SIZE;
-        basic_info.leftovers = input_scores_classes_count % HVX_SIZE;
-        if (basic_info.leftovers == 0) {
-            basic_info.round_classes_count -= HVX_SIZE;
-            basic_info.leftovers = HVX_SIZE;
-        }
+                score_threshold = 1;
+            }
+            struct general_info basic_info;
+            // because cmp.gt is >, not >=. take quantized scorethreshold -1 as threshold in comparison
+            basic_info.score_cmpthreshold = score_threshold - 1;
+            basic_info.round_classes_count = input_scores_classes_count / HVX_SIZE * HVX_SIZE;
+            basic_info.leftovers = input_scores_classes_count % HVX_SIZE;
+            if (basic_info.leftovers == 0) {
+                basic_info.round_classes_count -= HVX_SIZE;
+                basic_info.leftovers = HVX_SIZE;
+            }
 
-        if (nn->vtcm_size < TOTAL_USED_VTCM_SIZE) {
-            return errlog(nn,"multiclassnms could not get enough VTCM to validate score \n");
-        }
-        // To guarantee that OS has mapped the TCM range in a single page
-        int offset = 0;
-        struct validscore_thread_info thrinfo[VALIDATION_MAX_THREADS];
-        for(uint32_t i = 0; i < num_threads; i++) {
-            nn_sem_init(&thrinfo[i].done_sem, 0);
-            thrinfo[i].jobs_len = workload_for_worker[i];
-            thrinfo[i].jobinfo = validation_job + offset;
-            thrinfo[i].generalinfo = basic_info;
-            thrinfo[i].vtcm_addr = (void *)((uint32_t)nn->vtcm_ptr + i*THREAD_USED_VTCM_SIZE);
-            offset += workload_for_worker[i];
-            nn_os_work_for_vector(nn, validscore_thread_work, &thrinfo[i]);
-        }
+            if (nn->vtcm_size < TOTAL_USED_VTCM_SIZE) {
+                return errlog(nn,"multiclassnms could not get enough VTCM to validate score \n");
+            }
+            // To guarantee that OS has mapped the TCM range in a single page
+            int offset = 0;
+            struct validscore_thread_info thrinfo[VALIDATION_MAX_THREADS];
+            for(uint32_t i = 0; i < num_threads; i++) {
+                nn_sem_init(&thrinfo[i].done_sem, 0);
+                thrinfo[i].jobs_len = workload_for_worker[i];
+                thrinfo[i].jobinfo = validation_job + offset;
+                thrinfo[i].generalinfo = basic_info;
+                thrinfo[i].vtcm_addr = (void *)((uint32_t)nn->vtcm_ptr + i*THREAD_USED_VTCM_SIZE);
+                offset += workload_for_worker[i];
+                nn_os_work_for_vector(nn, validscore_thread_work, &thrinfo[i]);
+            }
 
-        for(uint32_t i =0; i < num_threads; i++) {
-            nn_sem_wait(&thrinfo[i].done_sem);
+            for(uint32_t i =0; i < num_threads; i++) {
+                nn_sem_wait(&thrinfo[i].done_sem);
+            }
+        } else { //nn->vtcm_is_real
+            logmsg(nn, 2, "No real VTCM, so no HVX score validation");
         }
 #endif
 
@@ -382,7 +390,7 @@ static int multiclassnms_8_execute(struct nn_node *self, struct nn_graph *nn) {
 
             input_boxes_tensor_batch = input_boxes_tensor_data + input_boxes_tensor_offset;
 #if defined(HEXAGON_V65) || defined(HEXAGON_V66)
-            if (0 == validnum[i])
+            if ((scores_validated) && (0 == validnum[i]))
                 continue;
 #endif
             //keep the coordinates that are in the range of [0,1]
@@ -396,24 +404,30 @@ static int multiclassnms_8_execute(struct nn_node *self, struct nn_graph *nn) {
                 continue;
 
 #if defined(HEXAGON_V65) || defined(HEXAGON_V66)
-            uint16_t * valid_index_array = &(validclassidx[i*input_scores_classes_count]);
-            for (uint32_t j = 0; j < validnum[i]; ++j) {                                         //j: valid copy loop count
-                // Fetch valid class index directly
-                uint32_t valid_index = valid_index_array[j];
-                new_boxRecord_8(&box_records[box_record_idx], i, box_scores_tensor[valid_index], valid_index);
-                new_boxRecord_8_Ref(&box_records_ref[box_record_idx],box_scores_tensor[valid_index], box_record_idx);
-                ++box_record_idx;
-            }//end traverse of scores of each box
-#else
-            for (int32_t j = 0; j < input_scores_classes_count; ++j) {                          //j: class index
-                if (box_scores_tensor[j] < score_threshold)
-                    continue;
-
-                new_boxRecord_8(&box_records[box_record_idx], i, box_scores_tensor[j], (uint32_t)j);
-                new_boxRecord_8_Ref(&box_records_ref[box_record_idx],box_scores_tensor[j], box_record_idx);
-                ++box_record_idx;
-            }//end traverse of scores of each box
+            if (scores_validated) {
+                uint16_t * valid_index_array = &(validclassidx[i*input_scores_classes_count]);
+                for (uint32_t j = 0; j < validnum[i]; ++j) {                                         //j: valid copy loop count
+                    // Fetch valid class index directly
+                    uint32_t valid_index = valid_index_array[j];
+                    new_boxRecord_8(&box_records[box_record_idx], i, box_scores_tensor[valid_index], valid_index);
+                    new_boxRecord_8_Ref(&box_records_ref[box_record_idx],box_scores_tensor[valid_index], box_record_idx);
+                    ++box_record_idx;
+                }//end traverse of scores of each box
+            } else
+            // NOTE the fallthrough here.
+            // V60 hits the code below, as does V65 when there is no real VTCM
 #endif
+            { 
+                for (int32_t j = 0; j < input_scores_classes_count; ++j) {                          //j: class index
+                    if (box_scores_tensor[j] < score_threshold)
+                        continue;
+
+                    new_boxRecord_8(&box_records[box_record_idx], i, box_scores_tensor[j], (uint32_t)j);
+                    new_boxRecord_8_Ref(&box_records_ref[box_record_idx],box_scores_tensor[j], box_record_idx);
+                    ++box_record_idx;
+                }//end traverse of scores of each box
+            }
+
         }//end traverse of boxes
 
         //sort box records in descending order
@@ -511,6 +525,8 @@ static int multiclassnms_8_check(struct nn_node *self, struct nn_graph *nn)  {
     size_t filtered_boxes_hashtable_size = (1 + max_detection_per_class) * input_scores_classes_count * sizeof(uint32_t);  //(number of filtered boxes per class + max number of boxes per class)*max number of classes
     size_t total_size = boxes_array_size + boxes_records_array_size + boxes_records_ref_array_size + filtered_boxes_hashtable_size;
 #if defined(HEXAGON_V65) || defined(HEXAGON_V66)
+    // TODO: check this later in execute instead of now, since we can fallback to not using vscatter
+    // when we cannot get real VTCM
     if (UINT16_MAX < input_scores_classes_count) {
         return errlog(nn,"multiclassnms input class count is too big to get validation with half-word vscatter\n");
     }

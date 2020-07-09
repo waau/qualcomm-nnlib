@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -306,7 +306,13 @@ __QAIC_STUB_EXPORT int hexagon_nn_domains_execute_with_info_impl(remote_handle64
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_init_with_info_impl(remote_handle64 _h, hexagon_nn_nn_id* g, const hexagon_nn_initinfo* info)
 {
-    return(stub_hexagon_nn_domains_init_with_info(_h, g, info));
+    int sts;
+    sts = stub_hexagon_nn_domains_init_with_info(_h, g, info);
+
+    if(sts == 0){
+         sts = add_nn_id(_h, *g);
+    }
+    return sts;
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_get_nodetype_impl(remote_handle64 _h, hexagon_nn_nn_id graph_id, hexagon_nn_nn_id node_id, unsigned int* node_type)
@@ -327,6 +333,27 @@ __QAIC_STUB_EXPORT int hexagon_nn_domains_get_power_impl(remote_handle64 _h, int
 __QAIC_STUB_EXPORT int hexagon_nn_domains_set_graph_option_impl(remote_handle64 _h, hexagon_nn_nn_id id, const char* name, int value)
 {
     return(stub_hexagon_nn_domains_set_graph_option(_h, id, name, value));
+}
+
+__QAIC_STUB_EXPORT int hexagon_nn_domains_serialize_size_impl(remote_handle64 _h, hexagon_nn_nn_id id, unsigned int* serialized_obj_size_out, unsigned int* return_code)
+{
+    return(stub_hexagon_nn_domains_serialize_size(_h, id, serialized_obj_size_out, return_code));
+}
+
+__QAIC_STUB_EXPORT int hexagon_nn_domains_serialize_impl(remote_handle64 _h, hexagon_nn_nn_id id, unsigned char* buffer, int bufferLen, unsigned int* return_code)
+{
+    return(stub_hexagon_nn_domains_serialize(_h, id, buffer, bufferLen, return_code));
+}
+
+__QAIC_STUB_EXPORT int hexagon_nn_domains_deserialize_impl(remote_handle64 _h, const unsigned char* buffer, int bufferLen, hexagon_nn_nn_id* new_graph_out, unsigned int* return_code)
+{
+    return(stub_hexagon_nn_domains_deserialize(_h, buffer, bufferLen, new_graph_out, return_code));
+}
+
+__QAIC_STUB_EXPORT int hexagon_nn_domains_execute_with_option_impl(remote_handle64 _h, hexagon_nn_nn_id id,
+        const hexagon_nn_tensordef* inputs, int inputsLen, hexagon_nn_tensordef* outputs, int outputsLen, hexagon_nn_execute_info* execute_info, const hexagon_nn_execute_option *options, int n_options)
+{
+    return(stub_hexagon_nn_domains_execute_with_option(_h, id, inputs, inputsLen, outputs, outputsLen, execute_info, options, n_options));
 }
 
 #ifdef  __QAIC_STUB

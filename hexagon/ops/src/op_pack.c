@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -107,7 +107,7 @@ static int find_pack_shape(
 		concat_dim = concat_dim + 3 - input_rank;
 	}
 	if (!(concat_dim >= 0 && concat_dim <= 3))
-		return -1;
+		return errlog(NULL,"concat_dim  =%d  out of range",concat_dim);
 
 	int i, j;
 	// Expand dim and save new dim in shape buffer
@@ -298,7 +298,7 @@ static void pack_work(
 		in_min = fminf(0.0f, in_min); // in_min <= 0.0f
 		float in_level = flt_div_255(in_max-in_min);
 
-		int32_t offset = max_i32(0, roundf_i32((in_min - out_min)*out_level_recip));
+		int32_t offset = max_i32(0, roundf_i32((in_min - out_min)/in_level));
 		int32_t gaint = roundf_i32(out_level_recip*in_level* 32768.0f);
 		int32_t gain = min_i32(32767, gaint);
 

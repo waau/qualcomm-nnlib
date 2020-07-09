@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,6 +35,160 @@
  */
 #include <nn_graph.h>
 #include <string.h>
+#include "hvx_inlines.h"
+#if defined(__hexagon__)
+#include <hexagon_types.h>
+#endif
+
+
+struct tile_info {
+	int has_valid_vctl;
+	HVX_Vector *vctl_ptr;
+};
+
+struct tile_run_state {
+	struct tile_info *info;
+	uint8_t *in_data;
+	uint8_t *out_data;
+	nn_sem_t done_sem;
+	int batches;
+	int height;
+	int width;
+	int depth;
+	int b_multiple;
+	int h_multiple;
+	int w_multiple;
+	int d_multiple;
+};
+
+//limitation: d_in must be power of 2(including 1), and (d_in*d_mul) < vector length
+static void do_depth_tile_hvx(struct tile_run_state *rst, const uint8_t *in_data, uint8_t *out_data, const HVX_Vector *pvctl)
+{
+	const uint8_t *pin = in_data;
+	uint8_t *pout = out_data;
+	size_t size = rst->width * rst->depth * rst->w_multiple * rst->d_multiple;
+	int d_mul = rst->d_multiple;
+	while (pout < (out_data + size)) {
+		//unaligned load vector, first 128/d_mul bytes are used in vdelta, the rest are useless
+		HVX_Vector vin = q6op_V_vldu_A((HVX_Vector *)(pin));
+		//use permutation command for tile along depth
+		// vin:		[w0][0],[w0][1],...,[w0][depth-1],
+		//			[w1][0],[w1][1],...,[w1][depth-1],
+		//			X,X,......X (unused)
+		// vout:	[w0][0],[w0][1],...,[w0][depth-1], [w0][0],[w0][1],...,[w0][depth-1], ...
+		//			[w1][0],[w1][1],...,[w1][depth-1], [w1][0],[w1][1],...,[w1][depth-1], ...
+		//			......
+		HVX_Vector vout = Q6_V_vdelta_VV(vin, *pvctl);
+		//unaligned store vector
+		q6op_vstu_AV((HVX_Vector *)pout, vout);
+
+		pin += 128/d_mul;
+		pout += (128/d_mul) * d_mul;
+	}
+}
+
+static void tile_worker_thread(struct nn_graph * nn, void * rstpv)
+{
+	logmsg(nn,2,"tile_worker_thread");
+	struct tile_run_state *rst = (struct tile_run_state *)rstpv;
+	uint8_t  *in_data       = (uint8_t *)rst->in_data;
+	uint8_t  *out_data      = (uint8_t *)rst->out_data;
+
+	int batches = rst->batches;
+	int height = rst->height;
+	int width = rst->width;
+	int depth = rst->depth;
+
+	int b_multiple = rst->b_multiple;
+	int h_multiple = rst->h_multiple;
+	int w_multiple = rst->w_multiple;
+	int d_multiple = rst->d_multiple;
+
+	int dwh = depth*width*height;
+	int dw = depth*width;
+
+	struct tile_info *info = rst->info;
+
+	int use_hvx = 0;
+	if ((depth & depth-1) == 0 && (depth*d_multiple) <= 128 && depth <= 8 && d_multiple > 1 ) {
+		use_hvx = 1;
+		if (info->has_valid_vctl == 0) {
+			// design map and ctrl for vdelta only once
+			//  one group contains d_multiple*depth data, d = { 0,1,2,...,depth-1}, duplicate d_multiple times,
+			//  each command can handle 128/(d_multiple*depth) groups.
+			HVX_Vector vmap;
+			uint8_t *map = (uint8_t*)(&vmap);
+			int n_groups = 128/(d_multiple*depth);
+			for (int src=0, dst=0; src < (n_groups*depth); ) {
+				for (int m=0; m < d_multiple; m++) {
+					for (int d=0; d < depth; d++) {
+						map[dst++] = src + d;
+					}
+				}
+				src += depth; //next group
+			}
+			*(info->vctl_ptr) = design_for_delta(vmap, vmap, 0);
+			info->has_valid_vctl = 1;
+		}
+	}
+
+	int chunk_size_d = depth;
+	int chunk_size_w = chunk_size_d * d_multiple*width;
+	int chunk_size_h = chunk_size_w * w_multiple*height;
+	int chunk_size_b = chunk_size_h * h_multiple*batches;
+
+	int counter = 0;
+
+	for(int b = 0; b < batches; b++){
+		int c1 = b*dwh;
+		uint8_t *copy_start_w = out_data+counter;
+		for(int h = 0; h < height; h++){
+			int c2 = h*dw + c1;
+			uint8_t *copy_start_d = out_data+counter;
+			// inner loop for tile along depth
+			if (d_multiple > 1) {
+				if (use_hvx) {
+					// special case: data replication with vdelta
+					do_depth_tile_hvx(rst, in_data+c2, out_data+counter, info->vctl_ptr);
+				}
+				else {
+					// general case: copy src 2d square [width,depth] to dst for d_multiple times,
+					// increase offset of dst square by depth each time.
+					int offset_2d = counter;
+					for(int d_mul = 0; d_mul < d_multiple; d_mul++){
+						int src_width = depth;
+						int src_height = width;
+						int src_stride = depth;
+						int dst_stride = depth * d_multiple;
+						vmemcpy_2d_general_asm(src_width, src_height, out_data+offset_2d, dst_stride, in_data+c2, src_stride);
+						offset_2d += depth;
+					}
+				}
+			}
+			else {
+				// special case: if d_multiple is 1, the square in dst is also contiguous (stride==width),
+				// we can use 1d vmemcpy instead of 2d for speed.
+				vmemcpy_asm(out_data+counter, in_data+c2, depth*width);
+			}
+			counter += chunk_size_w;
+
+			for(int w_mul = 1; w_mul < w_multiple; w_mul++){
+				vmemcpy_asm(out_data+counter, copy_start_d, chunk_size_w );
+				counter += chunk_size_w;
+			}
+		}
+		for(int h_mul = 1; h_mul < h_multiple; h_mul++){
+			vmemcpy_asm(out_data+counter, copy_start_w, chunk_size_h );
+			counter += chunk_size_h;
+		}
+	}
+	for(int b_mul = 1; b_mul < b_multiple; b_mul++){
+		vmemcpy_asm( out_data+counter, out_data, chunk_size_b );
+		counter += chunk_size_b;
+	}
+
+	nn_sem_post(&rst->done_sem);
+}
 
 /*
  *
@@ -42,6 +196,7 @@
  *
  * This contains a tile node
  */
+
 
 static int tile_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -68,9 +223,6 @@ static int tile_execute(struct nn_node *self, struct nn_graph *nn)
 	int width = in_tensor->shape.width;
 	int depth = in_tensor->shape.depth;
 
-	int dwh = depth*width*height;
-	int dw = depth*width;
-
     int multiple_size = multiples_tensor->shape.batches * multiples_tensor->shape.height * multiples_tensor->shape.width * multiples_tensor->shape.depth;
 
 	int b_multiple = multiple_size > 3 ? multiples[0] : 1;
@@ -85,58 +237,59 @@ static int tile_execute(struct nn_node *self, struct nn_graph *nn)
 	*out_min = in_min;
 	*out_max = in_max;
 
-	int chunk_size_d = depth;
-	int chunk_size_w = chunk_size_d * d_multiple*width;
-	int chunk_size_h = chunk_size_w * w_multiple*height;
-	int chunk_size_b = chunk_size_h * h_multiple*batches;
-
-	int counter = 0;
-
-	struct nn_memcpy_manager  mcman;
-	nn_mcmanager_init(nn, &mcman );
-
-	for(int b = 0; b < batches; b++){
-		int c1 = b*dwh;
-		uint8_t *copy_start_w = out_data+counter;
-		for(int h = 0; h < height; h++){
-			int c2 = h*dw + c1;
-			uint8_t *copy_start_d = out_data+counter;
-			for(int w = 0; w < width; w++){
-				int c3 = w*depth + c2;
-				for(int d_mul = 0; d_mul < d_multiple; d_mul++){
-					nn_mcmanager_vmemcpy( nn, &mcman, out_data+counter, in_data+c3, chunk_size_d );
-					counter += chunk_size_d;
-				}
-			}
-			nn_mcmanager_wait( nn, &mcman );
-			for(int w_mul = 1; w_mul < w_multiple; w_mul++){
-				nn_mcmanager_vmemcpy( nn, &mcman, out_data+counter, copy_start_d, chunk_size_w );
-				counter += chunk_size_w;
-			}
-		}
-		nn_mcmanager_wait( nn, &mcman );
-		for(int h_mul = 1; h_mul < h_multiple; h_mul++){
-			nn_mcmanager_vmemcpy( nn, &mcman, out_data+counter, copy_start_w, chunk_size_h );
-			counter += chunk_size_h;
-		}
-	}
-	nn_mcmanager_wait( nn, &mcman );
-	for(int b_mul = 1; b_mul < b_multiple; b_mul++){
-		nn_mcmanager_vmemcpy( nn, &mcman, out_data+counter, out_data, chunk_size_b );
-		counter += chunk_size_b;
-	}
-
-	nn_mcmanager_wait( nn, &mcman );
+	//worker thread
+	void (*thread_run_fp)( struct nn_graph * nn, void * rstpv) = tile_worker_thread;
+	struct tile_run_state rstt;
+	rstt.info = (struct tile_info*)self->opaque;
+	rstt.in_data = in_data;
+	rstt.out_data = out_data;
+	rstt.batches = batches;
+	rstt.height = height;
+	rstt.width = width;
+	rstt.depth = depth;
+	rstt.b_multiple = b_multiple;
+	rstt.h_multiple = h_multiple;
+	rstt.w_multiple = w_multiple;
+	rstt.d_multiple = d_multiple;
+	nn_sem_init(&rstt.done_sem, 0);
+	nn_os_work_for_vector(nn,thread_run_fp, &rstt);
+	nn_sem_wait(&rstt.done_sem);
 
 	return 0;
 }
 
+static int tile_check(struct nn_node *self, struct nn_graph *nn)
+{
+	if( self->opaque == NULL){
+		struct tile_info *info = (struct tile_info*)nn_calloc( 1, sizeof(struct tile_info));
+		if(info == NULL) return errlog(nn,"calloc failed");
+		if (info->vctl_ptr == NULL) {
+			if ((info->vctl_ptr = nn_memalign(128,128)) == NULL) {
+				nn_free(info);
+				return errlog(nn, "can't allocate vctl_ptr");
+			}
+		}
+		self->opaque = (void*)info;
+	}
+	return 0;
+};
+
+static int tile_dtor(struct nn_node *self, struct nn_graph *nn)
+{
+	if( self->opaque != NULL){
+		struct tile_info * info = (struct tile_info*)self->opaque;
+		if( info->vctl_ptr != NULL) nn_free(info->vctl_ptr);
+		nn_free(self->opaque);
+		self->opaque = NULL;
+	}
+	return node_free_common(self, nn);
+}
 
 struct nn_node_ops nn_ops_for_QuantizedTile_8 = {
 	.execute = tile_execute,
-	.check = NULL,
+	.check = tile_check,
 	.ctor = node_alloc_common,
-	.dtor = node_free_common,
+	.dtor = tile_dtor,
 	.n_inputs = NN_IOCOUNT(4),
 	.n_outputs = NN_IOCOUNT(3),
 };

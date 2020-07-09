@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -45,6 +45,7 @@ int Total_Threads = 4;
 int Num_Vector_Threads = 2;
 int Total_Threads = 2;
 #endif
+nn_mutex_t num_threads_mutex = NN_MUTEX_INIT;
 
 int Stack_Size = 16384;
 int VTCM_User_Req = -1;
@@ -174,11 +175,11 @@ void nn_os_vector_workers_acquire(struct nn_graph *nn)
 	do {
 		hvx_lock_fail = 0;
 		/* Tell all the vector threads to acquire vectors */
-		for (i = 0; i < (Num_Vector_Threads); i++) {
+		for (i = 0; i < (nn->num_vector_threads); i++) {
 			nn_os_work_for_vector(nn,worker_acquire,&info[i]);
 		}
 		/* wait for all the threads to lock vectors */
-		for (i = 0; i < (Num_Vector_Threads); i++) {
+		for (i = 0; i < (nn->num_vector_threads); i++) {
 			nn_sem_wait(&info[i].ack);
 			nn_sem_post(&info[i].go);
 			/* set hvx lock fail flag if lock error return from any thread */
@@ -196,26 +197,26 @@ void nn_os_vector_workers_acquire(struct nn_graph *nn)
 		/* handle hvx lock error - release all occupied hvx vector and then try to relock*/
 		if (hvx_lock_fail) {
 			/* Tell all the vector threads to release vectors */
-			for (i = 0; i < (Num_Vector_Threads); i++) {
+			for (i = 0; i < (nn->num_vector_threads); i++) {
 				nn_os_work_for_vector(nn,worker_release,&info[i]);
 				nn_sem_wait(&info[i].ack);
 			}
-			for (i = 0; i < (Num_Vector_Threads); i++) {
+			for (i = 0; i < (nn->num_vector_threads); i++) {
 				nn_sem_post(&info[i].go);
 			}
 		}
 	} while(hvx_lock_fail); /*keep acquiring hvx until successful*/
 #else
 	/* Tell all the vector threads to release vectors */
-	for (i = 0; i < (Num_Vector_Threads); i++) {
+	for (i = 0; i < (nn->num_vector_threads); i++) {
 		nn_os_work_for_vector(nn,worker_acquire,&info[i]);
 	}
 	/* wait for all the threads to release vectors */
-	for (i = 0; i < (Num_Vector_Threads); i++) {
+	for (i = 0; i < (nn->num_vector_threads); i++) {
 		nn_sem_wait(&info[i].ack);
 	}
 	/* tell all the threads to keep going */
-	for (i = 0; i < (Num_Vector_Threads); i++) {
+	for (i = 0; i < (nn->num_vector_threads); i++) {
 		nn_sem_post(&info[i].go);
 	}
 #endif
@@ -229,11 +230,11 @@ void nn_os_vector_workers_release(struct nn_graph *nn)
 	int i;
 	logmsg(nn,4,"release");
 	struct nn_thread_info *info = nn->os_opaque;
-	for (i = 0; i < (Num_Vector_Threads); i++) {
+	for (i = 0; i < (nn->num_vector_threads); i++) {
 		nn_os_work_for_vector(nn,worker_release,&info[i]);
 		nn_sem_wait(&info[i].ack);
 	}
-	for (i = 0; i < (Num_Vector_Threads); i++) {
+	for (i = 0; i < (nn->num_vector_threads); i++) {
 		nn_sem_post(&info[i].go);
 	}
 	logmsg(nn,4,"release done");
@@ -245,7 +246,7 @@ int nn_os_careful_free(struct nn_graph *nn, int ret)
 	struct nn_thread_info *worker_info = nn->os_opaque;
 	int i;
 	if (worker_info == NULL) return ret;
-	for (i = 0; i < Total_Threads; i++) {
+	for (i = 0; i < nn->total_threads; i++) {
 		if (worker_info[i].stack) nn_free(worker_info[i].stack);
 	}
 	nn_free(worker_info);
@@ -262,10 +263,10 @@ void nn_os_join_n_threads(struct nn_graph *nn, int n_threads)
 	int i;
 	struct nn_thread_info *worker_info = nn->os_opaque;
 	for (i = 0; i < n_threads; i++) {
-		if (i < Num_Vector_Threads) nn_os_work_for_vector(nn,NULL,NULL);
+		if (i < nn->num_vector_threads) nn_os_work_for_vector(nn,NULL,NULL);
 		else nn_os_work_for_scalar(nn,NULL,NULL);
 	}
-	for (i = 0; i < Total_Threads; i++) {
+	for (i = 0; i < nn->total_threads; i++) {
 		nn_thread_join(worker_info[i].tid,NULL);
 	}
 }
@@ -296,7 +297,7 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	if (nn->os_opaque != NULL) {
 		return errlog(nn,"OS workers already spawned?");
 	}
-	if ((worker_info = nn_calloc(sizeof(*worker_info),(Total_Threads))) == NULL) {
+	if ((worker_info = nn_calloc(sizeof(*worker_info),(nn->total_threads))) == NULL) {
 		return nn_os_careful_free(nn,errlog(nn,"OS calloc fail"));
 	}
 	nn->os_opaque = worker_info;
@@ -307,7 +308,7 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	if ((nn->nonvec_work = nn_pipe_alloc(nn, 128)) == NULL) {
 		return nn_os_careful_free(nn,errlog(nn,"os pipe alloc fail"));
 	}
-	for (i = 0; i < Total_Threads; i++) {
+	for (i = 0; i < nn->total_threads; i++) {
 		if ((worker_info[i].stack = nn_malloc(Stack_Size)) == NULL) {
 			return nn_os_careful_free(nn,errlog(nn,"thread stack malloc fail"));
 		}
@@ -319,9 +320,9 @@ int nn_os_workers_spawn(struct nn_graph *nn)
 	info.nn = nn;
 	nn_os_vector_init();
 
-	for (i = 0; i < Total_Threads; i++) {
+	for (i = 0; i < nn->total_threads; i++) {
 		nn_thread_attr_setstack(&attrs,worker_info[i].stack,Stack_Size);
-		if (i < Num_Vector_Threads) info.pipe = nn->vec_work;
+		if (i < nn->num_vector_threads) info.pipe = nn->vec_work;
 		else info.pipe = nn->nonvec_work;
 		if (nn_thread_create(nn,&worker_info[i].tid,&attrs,nn_os_worker,&info) != 0) {
 			nn_os_join_n_threads(nn,i);
@@ -342,7 +343,7 @@ void nn_os_workers_kill(struct nn_graph *nn)
 		errlog(nn,"OS workers already killed?");
 		return;
 	}
-	nn_os_join_n_threads(nn,Total_Threads);
+	nn_os_join_n_threads(nn,nn->total_threads);
 	nn_os_careful_free(nn,0);
 	logmsg(nn,4,"workers kill done");
 }

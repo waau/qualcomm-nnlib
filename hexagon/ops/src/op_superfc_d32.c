@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -1236,7 +1236,7 @@ int superfc_recalculate_strategy(struct nn_node *self, struct nn_graph *nn)
 
 
 	/* Compute reciprocal and shift amount and associated scaling info */
-	if(fill_info_minmax_basics(nn,self,info)) return -1;
+	if(fill_info_minmax_basics(nn,self,info)) return errlog(nn, "error in fill_info_minmax_basics()");
 
 	logmsg(nn,2,"out_maxval=%f in_level_size=%f filt_level_size=%f prod_level_size=%2.12f max_valid ~= %d",
 		info->out_maxval,
@@ -1580,7 +1580,7 @@ int superfc_check_ref(struct nn_node *self, struct nn_graph *nn)
 	info->strategy_valid = 0;	/* Redundant w/ calloc */
 	self->opaque = info;
 
-	if(setup_initial_output_range(nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return -1;
+	if(setup_initial_output_range(nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return errlog(nn, " error in setup_initial_output_range()");
 
 	return 0;
 }
@@ -1732,7 +1732,7 @@ int superfc_check(struct nn_node *self, struct nn_graph *nn)
 	info->filt_offset = filt_offset;
 	info->weights_level_size = filt_level_size;
 
-	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return -1;
+	if(setup_initial_output_range( nn, info, specified_minval, specified_maxval, 0.0f, 0.5f)) return errlog(nn,"error setup_initial_output_range()");
 
 	// figure out scratch requirements
 	// components are ( each rounded up to vector):

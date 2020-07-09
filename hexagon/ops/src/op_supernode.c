@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -394,12 +394,16 @@ static int supernode_execute_ref(struct nn_node *self, struct nn_graph *nn)
 	    sum = biasbuf[i] + tmp_out[j*out_depth+i] + minval_offset;
 // WOLFE - CHECK THIS MATH! vvvvvvv    (Does it still hold for 16b?)
 #ifdef USE_16BITS_RECIP
-	    int32_t out_i = ( ((sum) * fixed_recip_level_size) + (1<<15));
-	    out_i >>= 16;
+	    int64_t out_iL = ( ((int64_t)(sum) * (int64_t)fixed_recip_level_size) + (1<<15));
+	    int32_t out_i = out_iL >> 16;
 #else
 	    int64_t out_iL = ((long long)sum) * fixed_recip_level_size + (0x40000000LL); 
 	    int32_t out_i = out_iL >> 31;
 #endif
+	    //The preceeding multiply can overflow and wrap around... We detect by checking for a sign flip
+	    //Note that saturating overflow due to the shift is acceptable and handled further down
+	    if(out_iL < 0 && out_i > 0) out_i = 0;
+	    if(out_iL > 0 && out_i < 0) out_i = 65535; //Sign flip saturate (works for 8 and 16-bit)
 	    if (out_i < 0) out_i = 0;
 	    if (is_16b) {
 		    if (out_i > 65535) out_i = 65535;

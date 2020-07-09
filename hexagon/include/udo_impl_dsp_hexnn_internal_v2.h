@@ -1,6 +1,6 @@
 //==============================================================================
 //
-// Copyright (c) 2019 Qualcomm Technologies, Inc.
+// Copyright (c) 2019-2020 Qualcomm Technologies, Inc.
 // All Rights Reserved.
 // Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -10,7 +10,7 @@
 
 #ifndef SNPE_UDO_HEXNN_IMPL_HEXNN_H
 #define SNPE_UDO_HEXNN_IMPL_HEXNN_H
-#include "SnpeUdo/UdoImplDspHexNNv2.h"
+#include "SnpeUdo/UdoImplDsp.h"
 #include "nn_graph.h"
 
 typedef struct impl_library_t {

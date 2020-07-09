@@ -18,6 +18,8 @@ hexagon/asm_src/autoquantize_h.S
 hexagon/asm_src/biasadd_relu_requant.S
 hexagon/asm_src/vmemcpy_h.S
 hexagon/asm_src/vmemcpy_2d_h.S
+hexagon/asm_src/vmemcpy_2d_short.S
+hexagon/asm_src/vmemcpy_3d_short.S
 hexagon/asm_src/vmemcpy128_h.S
 hexagon/asm_src/vmemset_2d_h.S
 hexagon/asm_src/memconvert_hvx.S

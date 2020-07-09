@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -129,14 +129,15 @@ static inline void qminmax_hvx(
     int32_t elem,
     int32_t a_const_value,
     int32_t b_const_value,
-    int op)
+    int op,
+    int32_t use_a_const,
+    int32_t use_b_const)
 {
     HVX_Vector *ptr_a = (HVX_Vector *)a;
     HVX_Vector *ptr_b = (HVX_Vector *)b;
 
     int loopcount = elem / ALIGN_SIZE;
     int leftovers = elem % ALIGN_SIZE;
-
     // splat all constant values to vectors
     a_const_value = (a_const_value << 8) | a_const_value;
     a_const_value = Q6_R_combine_RlRl(a_const_value, a_const_value);
@@ -149,8 +150,8 @@ static inline void qminmax_hvx(
     int i = 0;
     for (i = 0; i < loopcount; i++)
     {
-        HVX_Vector ind_a = (a_const_value != 0) ? vaconst_val : *ptr_a++;
-        HVX_Vector ind_b = (b_const_value != 0) ? vbconst_val : *ptr_b++;
+        HVX_Vector ind_a = (use_a_const) ? vaconst_val : *ptr_a++;
+        HVX_Vector ind_b = (use_b_const) ? vbconst_val : *ptr_b++;
 
 
 
@@ -159,8 +160,8 @@ static inline void qminmax_hvx(
     }
     if (leftovers)
     {
-        HVX_Vector ind_a = (a_const_value != 0) ? vaconst_val : *ptr_a++;
-        HVX_Vector ind_b = (b_const_value != 0) ? vbconst_val : *ptr_b++;
+        HVX_Vector ind_a = (use_a_const) ? vaconst_val : *ptr_a++;
+        HVX_Vector ind_b = (use_b_const) ? vbconst_val : *ptr_b++;
 
         HVX_Vector res = op == MINIMUM ? Q6_Vub_vmin_VubVub(ind_a, ind_b) : Q6_Vub_vmax_VubVub(ind_a, ind_b);
         q6op_vstu_variable_ARV(&out[i * sizeof(HVX_Vector)], leftovers, res);
@@ -219,7 +220,7 @@ static void qminmax_thread_process(struct nn_graph *nn, void *vtdata)
     uint8_t *a_requant_data = info->a_tensor_intermed_b_buffer;
     uint8_t *b_requant_data = info->b_tensor_intermed_b_buffer;
 
-    int elements, a_const_value, b_const_value;
+    int elements, a_const_value, b_const_value, use_a_const, use_b_const;
 
     struct hvx_info opt_info;
     uint8_t *a_data_pad;
@@ -252,10 +253,12 @@ static void qminmax_thread_process(struct nn_graph *nn, void *vtdata)
     elements = opt_info.elements;
     a_const_value = opt_info.a_const_value;
     b_const_value = opt_info.b_const_value;
+    use_a_const = opt_info.use_a_const;
+    use_b_const = opt_info.use_b_const;
 
     if (td->opt_flag == 1)
     {
-        qminmax_hvx(a_data_pad, b_data_pad, out_data, elements, a_const_value, b_const_value, op);
+        qminmax_hvx(a_data_pad, b_data_pad, out_data, elements, a_const_value, b_const_value, op, use_a_const, use_b_const);
     }
 
     nn_sem_post(&td->donesem);
@@ -340,7 +343,7 @@ static int minmax_execute(struct nn_node *self, struct nn_graph *nn, int op)
     retval = 0;
     if (td.opt_flag == 2)
     {
-        return -1;
+        return errlog(nn,"minmax_info.opt_flag == 2 ");
     }
 
     if (td.opt_flag == 1)

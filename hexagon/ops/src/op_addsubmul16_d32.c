@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -931,7 +931,7 @@ static int addsub_d32_execute_common(struct nn_node *self, struct nn_graph *nn)
 		if( res == 0){
 			res =(info->setup_scaling_funcp)( nn,self);
 		}
-		if( res !=0 ) return -1;
+		if( res !=0 ) return errlog( nn,"error in info->setup_scaling_funcp() = %d ",res);
 	}
 
 	// strategy is good to go..

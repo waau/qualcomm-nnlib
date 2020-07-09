@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -151,7 +151,9 @@ static int quantize_execute_ref(struct nn_node *self, struct nn_graph *nn)
 
 
 #define MANTBITS 23
-static inline HVX_Vector requantize_words(HVX_Vector vals, int scaling, int min_offset_in, int maxexp_in)
+static inline HVX_Vector requantize_words(
+	HVX_Vector vals, int scaling,
+	int min_offset_in, int maxexp_in)
 {
 	const HVX_Vector const_zero = Q6_V_vsplat_R(0);
 	const HVX_Vector const_007f_ffff = Q6_V_vsplat_R(0x007fffff);
@@ -187,6 +189,79 @@ static inline HVX_Vector requantize_words(HVX_Vector vals, int scaling, int min_
 	return mant;
 }
 
+static inline HVX_Vector requantize_words_x16(
+	HVX_Vector vals,
+	const HVX_Vector vscaling_MSB,
+	const HVX_Vector vscaling_LSB,
+	const HVX_Vector vmin_offset,
+	const HVX_Vector vmaxexp)
+{
+	const HVX_Vector const_zero = Q6_V_vsplat_R(0);
+	const HVX_Vector const_007f_ffff = Q6_V_vsplat_R(0x007fffff);
+	const HVX_Vector const_0000_00ff = Q6_V_vsplat_R(0x000000ff);
+	const HVX_Vector const_0080_0000 = Q6_V_vsplat_R(0x00800000);
+	HVX_VectorPred p_neg;
+	HVX_Vector mant,exp;
+	HVX_Vector tmp;
+	HVX_Vector shift;
+	/* Check for negative values */
+	p_neg = Q6_Q_vcmp_gt_VwVw(const_zero,vals);
+	/* Extract exponent and mantissa, add back hidden 1 */
+	exp = Q6_Vuw_vlsr_VuwR(vals,MANTBITS);
+	mant = Q6_V_vand_VV(vals,const_007f_ffff);
+	exp = Q6_V_vand_VV(exp,const_0000_00ff);
+	mant = Q6_V_vor_VV(mant,const_0080_0000);
+	/* We need to shift right small exponents */
+	shift = Q6_Vw_vsub_VwVw(vmaxexp,exp);
+	/* shift should be >= 0, limit from -1 to 31 for saturation */
+	shift = Q6_Vw_vmin_VwVw(shift,Q6_V_vsplat_R(31));
+	shift = Q6_Vw_vmax_VwVw(shift,Q6_V_vsplat_R(-1));
+	mant = Q6_Vw_vlsr_VwVw(mant,shift);
+	tmp = Q6_Vw_vsub_VwVw(const_zero,mant);
+	/* Turn negative values into two's complement negative values */
+	mant = Q6_V_vmux_QVV(p_neg,tmp,mant);
+	/* Add min_offset to turn to unsigned */
+	mant = Q6_Vw_vadd_VwVw(mant,vmin_offset);
+	/* scaling up to 0xFFFF, mant up to 0x00FF_FFFF before shift*/
+	/* Multiply up to 0x7FFFFF_FFFF because scaling = 0x7FFFFFFFFFULL/rangemant */
+	/* rangemant >= mant */
+	HVX_Vector mant_hi_MSB = Q6_Vw_vmpye_VwVuh(mant,vscaling_MSB);
+	HVX_Vector mant_hi_LSB = Q6_Vw_vmpye_VwVuh(mant,vscaling_LSB);
+	mant_hi_LSB = Q6_Vw_vasr_VwR(mant_hi_LSB, 16);
+	// MANT_MSB + MANT_LSB to get final quantize result
+	HVX_Vector vquant = Q6_Vw_vadd_VwVw(mant_hi_MSB,mant_hi_LSB);
+	/* valid 32 bit - 0x007FFFFF */
+	vquant = Q6_Vw_vmax_VwVw(vquant,const_zero);
+	vquant = Q6_Vw_vmin_VwVw(vquant,const_007f_ffff);
+	vquant = Q6_Vw_vasl_VwR(vquant,9);
+	return vquant;
+}
+
+#define BLOCK_SIZE     (16*1024/128)  //# of vectors per chunk
+
+static inline HVX_Vector quantize_2vec_u16(
+	const HVX_Vector vin0,
+	const HVX_Vector vin1,
+	int scaling,
+	int min_offset,
+	int maxexp)
+{
+	HVX_Vector words0,words1;
+	HVX_Vector bytes;
+	int scaling_MSB = scaling >> 16;
+	int scaling_LSB = scaling & 0x0000FFFF;
+	const HVX_Vector vmin_offset = Q6_V_vsplat_R(min_offset);
+	const HVX_Vector vmaxexp = Q6_V_vsplat_R(maxexp);
+	const HVX_Vector vscaling_MSB = Q6_V_vsplat_R(scaling_MSB);
+	const HVX_Vector vscaling_LSB = Q6_V_vsplat_R(scaling_LSB);
+	/* We want to end up with a vector of bytes, so repeat 2x */
+	words0 = requantize_words_x16(vin0,vscaling_MSB,vscaling_LSB,vmin_offset,vmaxexp);
+	words1 = requantize_words_x16(vin1,vscaling_MSB,vscaling_LSB,vmin_offset,vmaxexp);
+	/* Should have values in MSB of words, pack together */
+	bytes = Q6_Vh_vpacko_VwVw(words1,words0);
+	return bytes;
+}
+
 #if 0
 static inline HVX_Vector quantize_4vec(
 	const HVX_Vector in0,
@@ -212,7 +287,7 @@ static inline HVX_Vector quantize_4vec(
 	return bytes;
 }
 
-#define BLOCK_SIZE     (16*1024/128)  //# of vectors per chunk
+
 // find range of floats in n values starting
 // at *ptr (which must be vector aligned).
 // The range is always assumed to include 0.0, even
@@ -286,8 +361,9 @@ find_minmax_of_floats_hvx( float const * ptr, uint32_t nvals, HVX_Vector *out )
 // and also the 'adjusted' min and max.
 //
 // returns -1 if either minmax input is inf or Nan
-int
-find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
+int find_scaling_for_hvx_quant (
+	float const minmax[2],
+	struct hvx_quant_parms *out)
 {
 	union {
 		float f;
@@ -305,7 +381,7 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 	uint32_t rangemant;
 	uint32_t rangeexp;
 	uint32_t scaling;
-	if( !flt_isfinite(minmax[0]) || !flt_isfinite(minmax[1])) return -1;
+	if( !flt_isfinite(minmax[0]) || !flt_isfinite(minmax[1])) return errlog(NULL,"minmax input is inf or Nan");
 
 
 	float minv = -minmax[0];
@@ -336,6 +412,65 @@ find_scaling_for_hvx_quant ( float const minmax[2], struct hvx_quant_parms *out)
 	scaling = 0xFFFFFFFFU/rangemant;
 	min_offset += rangemant >> 9;			// for rounding bias at the back end.
 
+	out->min_offset = min_offset;
+	out->scaling = scaling;
+	out->common_exp = common_exp;
+
+	out->minval = minv;
+	out->maxval = maxv;
+	return 0;
+}
+
+int find_scaling_for_hvx_quant_u16 (
+	float const minmax[2],
+	struct hvx_quant_parms *out)
+{
+	union {
+		float f;
+		uint32_t i;
+		struct {
+			uint32_t mant:23;
+			uint32_t exp:8;
+			uint32_t sign:1;
+		};
+	} minval,range;
+	uint32_t min_offset;
+	uint32_t common_exp;
+	uint32_t minval_exp;
+	uint32_t rangemant;
+	uint32_t rangeexp;
+	uint32_t scaling;
+	if( !flt_isfinite(minmax[0]) || !flt_isfinite(minmax[1])) return errlog(NULL,"minmax input is inf or Nan");
+
+
+	float minv = -minmax[0];
+	float maxv = fmaxf(minv+1e-18f, minmax[1]);
+
+	if( minv != 0.0f)	// make sure the 'zero' is an integer
+		adjust_minmax_for_zero_16b( & minv , & maxv);
+
+	minval.f = minv;
+	range.f = maxv-minv;
+	// align to use 65536 as u16 step size
+	//range.f = range.f * 1.000015259021897f;	// * 65536/65535 to get scale ratio
+	rangeexp = range.exp;
+	common_exp = rangeexp;
+	minval_exp = minval.exp;
+	min_offset = minval.mant | (1<<23);
+	if ((common_exp-minval_exp) >= 24) min_offset = 0;
+	else min_offset >>= common_exp-minval_exp;
+
+	rangemant = range.mant | (1<<23);
+	// since 'rangemant' is >= 2^23, 'scaling' will be up to 55-23=32bit.
+	// The back end will denorm mantissa, add min_offset, mul by 'scaling', and then
+	// wind up with a value ranging up to about 0x7FF8000000 (for input = maxval).
+	// we will take MSB of scaling to do multiplication. taking 16bit shift into acount
+	// when calculate round part. scaling_MSB = 0x7FFFFFFFFF/rangemant
+	// Expected rounding factor = 40 0000, for a rounding offset
+	// add (2^22/scaling) to min_offset, since scaling_MSB = 2^39/rangemant
+	// that value is about rangemant/2^17.
+	scaling = 0x7FFFFFFFFFFFFFULL/rangemant;
+	min_offset += rangemant >> 17;
 	out->min_offset = min_offset;
 	out->scaling = scaling;
 	out->common_exp = common_exp;
@@ -419,6 +554,131 @@ static int quantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
 	tensor_set_single_float(out_max_tensor, qparms.maxval);
 	return 0;
 }
+
+void hvx_do_quantize_u16(
+	const float *inp,
+	uint8_t *outp,
+	int n,
+	uint32_t min_offset,
+	uint32_t common_exp,
+	uint32_t scaling)
+{
+	const HVX_Vector const_zero = Q6_V_vsplat_R(0);
+	HVX_Vector const *vinp = (HVX_Vector const *)inp;
+	HVX_Vector *voutp = (HVX_Vector *)outp;
+	HVX_Vector vin1,out_leftovers;
+
+	unsigned int vectors_in_rounddown = n/32;
+	unsigned int out_leftovers_elements = n%64;
+	/* Quantize! */
+	int block = Q6_R_min_RR(2*(vectors_in_rounddown>>1), BLOCK_SIZE);
+	l2fetch(vinp, 128, 128, block);
+	for (int n = 0; n < 2*(vectors_in_rounddown>>1); n += BLOCK_SIZE) {
+		int next_block = Q6_R_min_RR(vectors_in_rounddown-n-block, BLOCK_SIZE);
+		wait_for_l2fetch();
+		if (next_block > 0) l2fetch(&vinp[block], 128, 128, next_block);
+		for (int i = 0; i < (block>>1); i++) {
+			*voutp++ = quantize_2vec_u16(vinp[0],vinp[1],scaling,min_offset,common_exp);
+			vinp += 2;
+		}
+		block = next_block;
+	}
+	if(out_leftovers_elements){
+		if (out_leftovers_elements > 32) {
+			vin1 = vinp[1];
+		}
+		else {
+			vin1 = const_zero;
+		}
+		out_leftovers = quantize_2vec_u16(vinp[0],vin1,scaling,min_offset,common_exp);
+		memcpy(voutp, &out_leftovers, out_leftovers_elements*sizeof(uint16_t));
+	}
+}
+
+static void quantize_u16_hvx(struct nn_graph *nn, void *infov)
+{
+	struct autoquantminmax_info *info = (struct autoquantminmax_info *)infov;
+
+	unsigned int elements = info->elements;
+	const float* in = info->in;
+	uint8_t* out = info->out;
+
+	struct hvx_quant_parms * qparms = info->qparms;
+	uint32_t min_offset = qparms->min_offset;
+	uint32_t common_exp = qparms->common_exp;
+	uint32_t scaling = qparms->scaling;
+
+	hvx_do_quantize_u16(in, out, elements, min_offset, common_exp, scaling);
+
+	nn_sem_post(&info->done_sem);
+}
+
+static int quantize_u16_work(
+	const struct tensor *in_tensor,
+	const struct tensor *min_tensor,
+	const struct tensor *max_tensor,
+	struct tensor *out_tensor,
+	struct tensor *out_min_tensor,
+	struct tensor *out_max_tensor,
+	struct nn_node *self, struct nn_graph *nn)
+{
+	int batches = in_tensor->shape.batches;
+	int height = in_tensor->shape.height;
+	int width = in_tensor->shape.width;
+	int depth = in_tensor->shape.depth;
+	int elements = batches*height*width*depth;
+
+	if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth, NN_TYPE_QUINT16)!=0 ){
+		return errlog(nn,"out too small for node %d to be %dx%dx%dx%d (%p) %d < %d",
+			      self->node_id, batches, height, width, depth,
+			      out_tensor, out_tensor->max_size, elements);
+	}
+
+	if( tensor_out_prepare_normal(out_min_tensor,1,1,1,1,NN_TYPE_FLOAT )!=0
+	  || tensor_out_prepare_normal(out_max_tensor,1,1,1,1,NN_TYPE_FLOAT )!=0 ){
+		return errlog(nn,"out min or max too small");
+	}
+
+	struct hvx_quant_parms qparms;
+	float min_in = tensor_get_float(min_tensor,0);
+	float max_in = tensor_get_float(max_tensor,0);
+
+	float minmaxbuf[2] = {-min_in,max_in};
+	if( find_scaling_for_hvx_quant_u16(minmaxbuf, &qparms)!=0 ){
+		errlog(nn,"inf or nan input, in autoquantize");
+		return errlog(nn,"inf or NaN input, to autoquantize");
+	}
+	logmsg(nn,2,"minval=%f maxval=%f range=%f scaling = %d, common_exp = %d min_offset=%x",
+		qparms.minval,qparms.maxval, qparms.maxval-qparms.minval, qparms.scaling, qparms.common_exp, qparms.min_offset);
+
+	tensor_set_float(out_min_tensor,0,qparms.minval);
+	tensor_set_float(out_max_tensor,0,qparms.maxval);
+
+	struct autoquantminmax_info aqinfo;
+	aqinfo.self = self;
+	aqinfo.err_flag = 0;
+	aqinfo.elements = elements;
+	aqinfo.qparms = &qparms;
+	aqinfo.in = in_tensor->data;
+	aqinfo.out = out_tensor->data;
+	nn_sem_init(&aqinfo.done_sem,0);
+	nn_os_work_for_vector(nn,quantize_u16_hvx,&aqinfo);
+	nn_sem_wait(&aqinfo.done_sem);
+	return (aqinfo.err_flag == 0)? 0 : -1;
+}
+
+static int quantize_execute_u16(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *min_tensor = self->inputs[1];
+	const struct tensor *max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	struct tensor *out_min_tensor = self->outputs[1];
+	struct tensor *out_max_tensor = self->outputs[2];
+	return quantize_u16_work(in_tensor, min_tensor, max_tensor, out_tensor, out_min_tensor, out_max_tensor, self, nn);
+}
+
+
 #if 0
 static void autoquantize_hvx(struct nn_graph *nn, void *infov)
 {
@@ -1154,6 +1414,7 @@ quant_do_d32_core_op(
 
 ///////////////////////////////////////////////////////////
 static void dequantize_hvx_work_func( struct nn_graph *nn, void *rstpv);
+static void dequantize_u16_hvx_work_func( struct nn_graph *nn, void *rstpv);
 
 struct dequant_runstate {
 	uint8_t const *inp;
@@ -1166,16 +1427,17 @@ struct dequant_runstate {
 	nn_sem_t done_sem;
 };
 
-static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
+static int dequantize_work(
+	struct nn_graph	*nn,
+	const struct tensor *in_tensor,
+	const struct tensor *min_tensor,
+	const struct tensor *max_tensor,
+	struct tensor *out_tensor,
+	int is_u16)
 {
-	const struct tensor *in_tensor = self->inputs[0];
-	const struct tensor *min_tensor = self->inputs[1];
-	const struct tensor *max_tensor = self->inputs[2];
-	struct tensor *out_tensor = self->outputs[0];
 	float minval = tensor_get_float(min_tensor,0);
 	float maxval = tensor_get_float(max_tensor,0);
-	float range = fmaxf(1e-18f, maxval-minval);
-	float stepsize = flt_div_255(range);
+	//float range = fmaxf(1e-18f, maxval-minval);
 	float batches = in_tensor->shape.batches;
 	float height = in_tensor->shape.height;
 	float width = in_tensor->shape.width;
@@ -1183,16 +1445,26 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	const uint8_t *in = in_tensor->data;
 	float *out = out_tensor->data;
 	unsigned numel = batches*height*width*depth;
-	int out_bytes =  numel*sizeof(float);
-	logmsg(nn,2,"dequantize execute. self=%p ",self);
-	if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth, NN_TYPE_FLOAT)!= 0 ){
-		return errlog(nn,"out too small for node %d %d < %d",self->node_id,out_tensor->max_size,out_bytes);
+
+	float stepsize = 0.0f;
+	int qzero = 0;
+	if (is_u16) {
+		qzero = get_qu16_level_size_zero(minval,maxval,&stepsize);
+		// the hvx code will quietly generate nonsense if stepsize is infeasible...
+		// it must be in range 2**-126 <= step < 2**112 to ensure results are
+		// all in 'normal' range.
+		if(stepsize <0.f || stepsize >=0x2.0p112 ){
+			return errlog(nn,"infeasible quantization step: %.6g",stepsize);
+		}
 	}
-	// the hvx code will quietly generate nonsense if stepsize is infeasible...
-	// it must be in range 2**-126 <= step < 2**120 to ensure results are
-	// all in 'normal' range.
-	if(stepsize <0.f || stepsize >=0x2.0p120 ){
-		return errlog(nn,"infeasible quantization step: %.6g",stepsize);
+	else {
+		qzero = get_qu8_level_size_zero(minval,maxval,&stepsize);
+		// the hvx code will quietly generate nonsense if stepsize is infeasible...
+		// it must be in range 2**-126 <= step < 2**120 to ensure results are
+		// all in 'normal' range.
+		if(stepsize <0.f || stepsize >=0x2.0p120 ){
+			return errlog(nn,"infeasible quantization step: %.6g",stepsize);
+		}
 	}
 	if( stepsize < 0x1.0p-126 ){
 		logmsg(nn,0,"dequant with stepsize = %.6g: filling with zero", stepsize);
@@ -1200,16 +1472,25 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 		return 0;
 	}
 
+	int out_bytes =  numel*sizeof(float);
+	logmsg(nn,2,"dequantize execute.");
+	if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth, NN_TYPE_FLOAT)!= 0 ){
+		return errlog(nn,"dequantize out too small %d < %d",out_tensor->max_size,out_bytes);
+	}
+
 	struct dequant_runstate rstate;
 	rstate.inp = in;
 	rstate.outp = out;
 	rstate.numel = numel;
 	rstate.qstep = stepsize;
-	rstate.qzero = saturate_u8(roundf_i32(-minval/stepsize));
+	rstate.qzero = qzero;
 	nn_sem_init( &rstate.done_sem,0);
 
 	// figure out the chunking...
 	unsigned nvec = (numel+127)/128u;	// number of vectors in all
+	if (is_u16) {
+		nvec = (numel*sizeof(uint16_t)+127)/128u;
+	}
 	// each 256 vectors converted means 128Kb of stores; we don't want to be
 	// larger that that, otherwise the stores to L2 cache could evict the ongoing
 	// prefetch.
@@ -1220,15 +1501,30 @@ static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
 	rstate.chunk = 128*chunk;		// in bytes
 	rstate.current_pos = 0;
 	int nthreads =  (nvec >(NUM_THREADS-1)*chunk)?NUM_THREADS: (nvec + (chunk-1))/chunk;
-	for( int i =0; i < nthreads;i++)
-		nn_os_work_for_vector( nn, dequantize_hvx_work_func, &rstate);
-	nn_sem_wait_n_times( &rstate.done_sem, nthreads);
-#if 0
-	for (int i = 0; i < numel; i++) {
-		out[i] = (in[i] * stepsize) + minval;
+	if (is_u16) {
+		for( int i =0; i < nthreads;i++) {
+			nn_os_work_for_vector( nn, dequantize_u16_hvx_work_func, &rstate);
+		}
+		nn_sem_wait_n_times( &rstate.done_sem, nthreads);
 	}
-#endif
+	else {
+		for( int i =0; i < nthreads;i++) {
+			nn_os_work_for_vector( nn, dequantize_hvx_work_func, &rstate);
+		}
+		nn_sem_wait_n_times( &rstate.done_sem, nthreads);
+	}
 	return 0;
+}
+
+static int dequantize_execute(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *in_tensor = self->inputs[0];
+	const struct tensor *min_tensor = self->inputs[1];
+	const struct tensor *max_tensor = self->inputs[2];
+	struct tensor *out_tensor = self->outputs[0];
+	int is_u16 = self->node_type == OP_Dequantize_u16;
+
+	return dequantize_work(nn, in_tensor, min_tensor, max_tensor, out_tensor, is_u16);
 }
 
 //////////////HVX for Dequantize
@@ -1418,6 +1714,208 @@ dequantize_hvx_work_func( struct nn_graph *nn, void *rstpv)
 	nn_sem_post( &rstp->done_sem);
 }
 
+//////////////HVX for Dequantize uint16
+//
+// hvx for dequant...
+// (1)  subtract the quantized zero and get paired int32 diff; result is -65535,65535 in 32 bits.
+//      extract MSB 16bit and package them back into int16 vector to get sign bit for step (6)
+// (2)  subtract the quantized zero and get absolute diff; result is 0,65535 in 16 bits.
+// (3)  multiply by a normalized 24 bit scale. This can be done using Q6_W_vmpye_VwVuh.
+//      the valid result is stored in upper 48bit in vector pair.
+//      shift and repack hi/lo pair to get highest 32 bits unsigned data.
+// (4)  Normalize scale on highest 32 bit and adjust the exponient accordingly. Then scale back
+//      to get final scale bits (23bit)
+// (5)  find the 'cl0' which is in 0..8 except when result from (2) is zero.
+// (6)  right-shift and round so the clz is 8 (rounding is tricky...)
+// (7)  pack the shift amounts back down to 16-bits, so they can be used to form the exponent and
+//      combined with signs from (1). This step also detects zeros from (2).
+// (8)  combine the exponents into results from 6.
+//
+// parameters are:
+//    - input quantized zero
+//    - 24-bit scale (0x800000..0xFFFFFF) which has been extracted from a float representing
+//      the quantization step.
+//    - base exponent (to be used when cl0 at step (3) is 0; to be reduced when cl0 is larger)
+//    - the base exponent must be at most 254, and at most 9 (to avoid denormals).
+//
+// Step (3,4,5) are inexact step.
+// overflow in the rounding is possible
+//
+//
+// v60 does not support Q6_W_vmpye_VwVuh, it will go to ref routine on v60
+#if	__HEXAGON_ARCH__ >= 62
+// ((inner function to process 32xw)
+static inline HVX_Vector_x2 __attribute__((always_inline))
+hvx_dequantize_32xw( HVX_Vector vin, int qzero, int scale, int base_exp)
+{
+	HVX_Vector vqzero = q6op_Vh_vsplat_R(qzero);
+	HVX_VectorPair inw = Q6_Ww_vsub_VuhVuh(vin, vqzero);
+	HVX_Vector inw_e = Q6_V_lo_W(inw);		// 0,2,4..   really 0,1,2,...,31
+	HVX_Vector inw_o = Q6_V_hi_W(inw);		// 1,3,5..   really 32,33,34,...,63
+	// in_msb is used to get sign bit for final float output
+	HVX_Vector in_msb = Q6_Vh_vshuffo_VhVh(inw_o, inw_e);  // shuffle back to 0,32,1,33,...,31,63
+
+	// substract qzero and get absolution difference directly
+	HVX_Vector vin_abs = Q6_Vuh_vabsdiff_VuhVuh(vin, vqzero);
+	// product is zero iff vinh =0;
+	// since scale is 0x800000 ... 0xFFFFFF,
+	// for in_abs in 1...65535, prod is 0x00:0080:0000 ... 0xFF:FEFF:FF01
+	// which will require at least 40bit data length for result, so we use Q6_W_vmpye_VwVuh
+	// the valid result is stored in upper 48bit in vector pair
+	//
+	HVX_Vector vscale = Q6_V_vsplat_R( scale );
+	// prod_w0: really 0,1,2,...,31
+	HVX_VectorPair prod_w0_pair = Q6_W_vmpye_VwVuh( vscale, vin_abs );
+	HVX_Vector prod_w0_msb = Q6_V_hi_W(prod_w0_pair);
+	HVX_Vector prod_w0_lsb = Q6_V_lo_W(prod_w0_pair);
+	HVX_Vector clz_w0_msb = Q6_Vuw_vcl0_Vuw(prod_w0_msb);
+	HVX_Vector vshift_cnt_w0 = Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(32),clz_w0_msb);
+	// left shift MSB:32bit and right shift LSB:16bit (upper 16bit of Q6_V_lo_W(prod_w0_pair)), get cast 32bit
+	prod_w0_msb = Q6_Vw_vasl_VwVw(prod_w0_msb,clz_w0_msb);
+	prod_w0_lsb = Q6_Vw_vlsr_VwVw(prod_w0_lsb,vshift_cnt_w0);
+	// this vor equal to vadd_VwVw to combine MSB and LSB into one 32bit vector
+	HVX_Vector prod_w0 = Q6_V_vor_VV(prod_w0_msb, prod_w0_lsb);
+
+	// fetch odd uint16_t element to reuse Q6_W_vmpye_VwVuh
+	// inabs_range_swap output sequence is 32,32,33,33,...,63,63
+	HVX_Vector inabs_odd = Q6_Vh_vshuffo_VhVh(vin_abs, vin_abs);
+	// prod_w2: really 32,33,34,...,63
+	HVX_VectorPair prod_w2_pair = Q6_W_vmpye_VwVuh( vscale, inabs_odd );
+	HVX_Vector prod_w2_msb = Q6_V_hi_W(prod_w2_pair);
+	HVX_Vector prod_w2_lsb = Q6_V_lo_W(prod_w2_pair);
+	HVX_Vector clz_w2_msb = Q6_Vuw_vcl0_Vuw(prod_w2_msb);
+	HVX_Vector vshift_cnt_w2 = Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(32),clz_w2_msb);
+	// left shift MSB:32bit and right shift LSB:16bit (upper 16bit of Q6_V_lo_W(prod_w2_pair)), get cast 32bit
+	prod_w2_msb = Q6_Vw_vasl_VwVw(prod_w2_msb,clz_w2_msb);
+	prod_w2_lsb = Q6_Vw_vlsr_VwVw(prod_w2_lsb,vshift_cnt_w2);
+	// this vor equal to vadd_VwVw to combine normalized MSB and LSB into one 32bit vector
+	HVX_Vector prod_w2 = Q6_V_vor_VV(prod_w2_msb, prod_w2_lsb);
+
+	// adjust exponient to align with 32bit normalization
+	HVX_Vector v_baseexp_h = q6op_Vh_vsplat_R( base_exp*128 );
+	// count MSB 32bit clz for shift, adjust exponient for casted 32bit (48-16=32) data
+	HVX_Vector exp_shift_w0 = Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(16),clz_w0_msb);
+	HVX_Vector exp_shift_w2 = Q6_Vw_vsub_VwVw(Q6_V_vsplat_R(16),clz_w2_msb);
+	// multiply 128 to shift exponient to corresponding bit position: s eeeeeeee xxxxxxx
+	exp_shift_w0 = Q6_Vw_vasl_VwR(exp_shift_w0,7);
+	exp_shift_w2 = Q6_Vw_vasl_VwR(exp_shift_w2,7);
+	// no need to extract sign bit from MSB (odd) especially
+	// because exp shift adjustment range from FFFF FFFF (FFFF F800) to 0000 0000 (0000 0800)
+	HVX_Vector exp_shift = Q6_Vh_vshuffe_VhVh( exp_shift_w2,exp_shift_w0);
+	v_baseexp_h = Q6_Vh_vadd_VhVh(v_baseexp_h,exp_shift);
+	//
+	// for rounding: add 0x80 then >>8.
+	// if the new result has 0 in msb, then overflow has occurred; for that we need to bump
+	// the exponent. We can leave upper 24 bits as zero -  it should change to 0x800000xx,
+	// but it doesn't matter since bit 31 will be lost anyway.
+	//
+	HVX_Vector vk80 = Q6_V_vsplat_R(0x80);
+	HVX_Vector mant_w0 = Q6_Vw_vadd_VwVw( prod_w0, vk80);
+	HVX_Vector mant_w2 = Q6_Vw_vadd_VwVw( prod_w2, vk80);
+	HVX_Vector manth_h02 = Q6_Vh_vshuffo_VhVh(mant_w2,mant_w0);	// collect to h
+	mant_w0 = Q6_Vuw_vlsr_VuwR( mant_w0,8);
+	mant_w2 = Q6_Vuw_vlsr_VuwR( mant_w2,8);
+
+	// and transfer the sign from MSB of diff
+	HVX_VectorPred sign = Q6_Q_vand_VR( in_msb, 0x80008000 );
+	HVX_Vector exp_02 = Q6_V_vandor_VQR( v_baseexp_h, sign, 0x80008000);
+
+	// overflow if manth are >= 0( bit 7 clear); add 1(<<7) to exp
+	HVX_VectorPred noflo_02 = Q6_Q_vcmp_gt_VhVh( Q6_V_vzero(), manth_h02 );
+	HVX_VectorPred iszero_02 = Q6_Q_vcmp_eq_VhVh( vin_abs, Q6_V_vzero() );
+
+	HVX_Vector oflo_add = q6op_V_vand_QnR(noflo_02, 0x00800080);
+	exp_02 = Q6_Vh_vadd_VhVh( exp_02, oflo_add);
+	// that's the exponent almost done. clear if value is 0.
+	exp_02 = q6op_V_vand_QnV(iszero_02, exp_02);
+	// now, exp_02 contains  s:eeeeeeee:0000000
+	// and we need to merge that to 'mant' values
+	HVX_VectorPair exp_w02 = Q6_Wh_vshuffoe_VhVh( exp_02, Q6_V_vzero());
+	HVX_Vector m_mask = Q6_V_vsplat_R( 0x007FFFFF);
+
+	HVX_Vector_x2 result;
+	result.val[0]= Q6_V_vor_VV( Q6_V_vand_VV( mant_w0,m_mask), Q6_V_lo_W(exp_w02));
+	result.val[1]= Q6_V_vor_VV( Q6_V_vand_VV( mant_w2,m_mask), Q6_V_hi_W(exp_w02));
+	return result;
+}
+#endif // #if	__HEXAGON_ARCH__ >= 62
+// This function converts 'n' uint16 to floats
+// using hvx ops, as if by outp[i] = (inp[i]-qzero)*qstep
+//
+// Requirements are:
+//  (1) input & output pointers must be aligned
+//  (2) n will be rounded up to a multiple of 32 (and last output
+//      will be fully written, with garbage in the padding lanes)
+//  (3) qzero must be 0..65535
+//  (4) qstep must be >0 and have an exponent field in range 1 ..238
+//      (otherwise overflow can happen in the exponent calc, with garbage results).
+//
+void
+hvx_do_dequantize_u16( uint8_t const * inp, float * outp, int n, int qzero, float qstep )
+{
+// v60 does not support Q6_W_vmpye_VwVuh, it will go to ref routine on v60
+#if	__HEXAGON_ARCH__ >= 62
+	union {
+		float as_f;
+		uint32_t as_u32;
+	} uu = { qstep };
+
+	// scale is the mantissa of qstep
+	// uint32_t scale_data = uu.as_u32 &0x7FFFFF;
+	// int end_zero_cnt = cle0(scale_data);
+	int scale = ( uu.as_u32 &0x7FFFFF) | 0x800000;
+	// base_exp is 8 more than the exponent.
+	int base_exp = ((uu.as_u32 >>23)&0xFF)+8;
+	int nvout  = (n+31)/32u;
+	int leftover = (nvout&1);
+	HVX_Vector const *vinp = (HVX_Vector const *)inp;
+	HVX_Vector  *voutp = (HVX_Vector *)outp;
+
+	HVX_Vector vin;// = *vinp++;
+//	HVX_Vector const * vlast = vinp + n;
+	for(int i = 0;i < nvout>>1; i++){
+		vin = *vinp++;
+		vin = Q6_Vh_vshuff_Vh(vin);				// really 0,32,1,33,...,31,63
+		HVX_Vector_x2 deq = hvx_dequantize_32xw(vin, qzero, scale, base_exp);
+		voutp[0] = deq.val[0];
+		voutp[1] = deq.val[1];
+		voutp += 2;
+	}
+	// any odd chunk at the end ?
+	if (leftover) {
+		vin = *vinp;
+		vin = Q6_Vh_vshuff_Vh(vin);				// really 0,32,1,33..
+		HVX_Vector_x2 deq = hvx_dequantize_32xw(vin, qzero, scale, base_exp);
+		voutp[0] = deq.val[0];
+	}
+#else
+	const uint16_t *in_16 = (uint16_t *)inp;
+	for (int i = 0; i < n; i++) {
+		outp[i] = (in_16[i] - qzero) * qstep;
+	}
+#endif
+}
+
+static void
+dequantize_u16_hvx_work_func( struct nn_graph *nn, void *rstpv)
+{
+	struct dequant_runstate *rstp = (struct dequant_runstate *)rstpv;
+	uint8_t const * inp0 = rstp->inp;
+	float * outp0 = rstp->outp;
+	unsigned all_numbytes = rstp->numel*sizeof(uint16_t);
+	unsigned chunk = rstp->chunk;
+	unsigned pos;
+	while ( pos  = __sync_fetch_and_add( &rstp->current_pos, chunk), pos < all_numbytes){
+		uint8_t const * inp = inp0 + pos;
+		unsigned outEleOffset = pos/sizeof(uint16_t);
+		float *outp = outp0 + outEleOffset;
+		unsigned numbytes = min_u32( chunk, all_numbytes-pos);
+		l2fetch( inp, 128,128, (numbytes+127)/128u);
+		unsigned numel = numbytes/sizeof(uint16_t);
+		hvx_do_dequantize_u16( inp, outp, numel, rstp->qzero,rstp->qstep );
+	}
+	nn_sem_post( &rstp->done_sem);
+}
 
 static int dequantize_i32_execute(struct nn_node *self, struct nn_graph *nn)
 {
@@ -1481,6 +1979,14 @@ struct nn_node_ops nn_ops_for_Quantize_ref = {
 	.n_outputs = NN_IOCOUNT(3),
 };
 
+struct nn_node_ops nn_ops_for_Quantize_u16 = {
+	.execute = quantize_execute_u16,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(3),
+};
 
 // AutoQuantize:
 // convert float to 8-bit quantized, using the actual
@@ -1555,8 +2061,16 @@ struct nn_node_ops nn_ops_for_Dequantize = {
 
 };
 
-
 struct nn_node_ops nn_ops_for_Dequantize_ref = {
+	.execute = dequantize_execute,
+	.check = NULL,
+	.ctor = node_alloc_common,
+	.dtor = node_free_common,
+	.n_inputs = NN_IOCOUNT(3),
+	.n_outputs = NN_IOCOUNT(1),
+};
+
+struct nn_node_ops nn_ops_for_Dequantize_u16 = {
 	.execute = dequantize_execute,
 	.check = NULL,
 	.ctor = node_alloc_common,
@@ -1633,6 +2147,7 @@ static void input_copy_work(
 #define NUM_METADATA_PER_INPUT_TENSOR 4
 #define NUM_METADATA_PER_QUANTIZED_TENSOR 3
 static int input_quantize_execute_opt(struct nn_node *self, struct nn_graph *nn){
+	int is_u16 = (self->node_type == OP_QuantizeINPUT_fto16);
 	if (nn->n_inputs % NUM_METADATA_PER_INPUT_TENSOR) {
 		return errlog(nn,"oops, input # does not have enough metadata %d",nn->n_inputs);
 	}
@@ -1658,9 +2173,10 @@ static int input_quantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
 		height = in_tensor->shape.height;
 		width = in_tensor->shape.width;
 		depth = in_tensor->shape.depth;
-		if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth, NN_TYPE_QUINT8)!=0 ){
+		int type = is_u16 ? NN_TYPE_QUINT16 : NN_TYPE_QUINT8;
+		if( tensor_out_prepare_normal(out_tensor,batches,height,width,depth, type)!=0 ){
 			return errlog(nn,"out too small (%p) %d < %d",
-								    out_tensor, out_tensor->max_size, batches*height*width*depth);
+								    out_tensor, out_tensor->max_size, batches*height*width*depth*tensor_type_size(type));
 		}
 	}
 
@@ -1668,6 +2184,8 @@ static int input_quantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
 		int input_index  = i * NUM_METADATA_PER_INPUT_TENSOR;
 		int output_index = i * NUM_METADATA_PER_QUANTIZED_TENSOR;
 		in_tensor = &nn->inputs[input_index];
+		in_min_tensor = &nn->inputs[input_index + 1];
+		in_max_tensor = &nn->inputs[input_index + 2];
 		out_tensor = self->outputs[output_index];
 		out_min_tensor = self->outputs[output_index + 1];
 		out_max_tensor = self->outputs[output_index + 2];
@@ -1676,8 +2194,6 @@ static int input_quantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
 		int needs_quantization =  tensor_get_int32(needs_quantization_tensor,0);
 
 		if (!needs_quantization){
-			in_min_tensor = &nn->inputs[input_index + 1];
-			in_max_tensor = &nn->inputs[input_index + 2];
 			input_copy_work(nn, in_tensor, in_min_tensor, in_max_tensor, out_tensor, out_min_tensor, out_max_tensor);
 
 		} else {
@@ -1687,10 +2203,14 @@ static int input_quantize_execute_opt(struct nn_node *self, struct nn_graph *nn)
 			}
 #endif
 			logmsg(nn,9,"input tensor data %x scratch %x",(uint32_t)in_tensor->data,(uint32_t)nn->scratch);
-
-			int elements = in_tensor->max_size/sizeof(float);
-			int k = autoquantize_work(nn, in_tensor, out_tensor, out_min_tensor, out_max_tensor, elements);
-			if( k!= 0) return k;
+			if (is_u16) {
+				return quantize_u16_work(in_tensor, in_min_tensor, in_max_tensor, out_tensor, out_min_tensor, out_max_tensor, self, nn);
+			}
+			else {
+				int elements = in_tensor->max_size/sizeof(float);
+				int k = autoquantize_work(nn, in_tensor, out_tensor, out_min_tensor, out_max_tensor, elements);
+				if( k!= 0) return k;
+			}
 		}
 	}
 	return 0;
@@ -1722,7 +2242,7 @@ static int input_quantize_check(struct nn_node *self, struct nn_graph *nn)
 //  nn->inputs[4 * i + 0] 0:  input, float tensor or quantized tensor
 //  nn->inputs[4 * i + (1,2)] :  scalar float, input min & max if quantized tensor
 //  nn->inputs[4 * i + 3]:  int 1 if it needs quantization, 0 otherwise
-//  self->outputs[3 * 0]:   qu8 tensor (d32 format)
+//  self->outputs[3 * 0]:   qu8 tensor
 //  self->outputs[3 * i + (1,2)]:  scalar float, output min & max
 //
 struct nn_node_ops nn_ops_for_QuantizeINPUT_f_to_8 = {
@@ -1732,6 +2252,21 @@ struct nn_node_ops nn_ops_for_QuantizeINPUT_f_to_8 = {
 	.dtor = node_free_common,
 	.n_inputs = NN_IOCOUNT_GE(0),
 	.n_outputs = NN_IOCOUNT_GE(0),
+};
+
+//  nn->inputs[4 * i + 0] 0:  input, float tensor or quantized tensor
+//  nn->inputs[4 * i + (1,2)] :  scalar float, input min & max if quantized tensor
+//  nn->inputs[4 * i + 3]:  int 1 if it needs quantization, 0 otherwise
+//  self->outputs[3 * 0]:   qu16 tensor
+//  self->outputs[3 * i + (1,2)]:  scalar float, output min & max
+//
+struct nn_node_ops nn_ops_for_QuantizeINPUT_fto16 = {
+		.execute = input_quantize_execute_opt,
+		.check = input_quantize_check,
+		.ctor = node_alloc_common,
+		.dtor = node_free_common,
+		.n_inputs = NN_IOCOUNT_GE(0),
+		.n_outputs = NN_IOCOUNT_GE(0),
 };
 
 // output dequantize opt
@@ -2061,9 +2596,17 @@ static int output_dequantize_execute_with_info(struct nn_graph *nn, struct outpu
 }
 
 static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *nn) {
+    int is_u16 = (self->node_type == OP_DequantizeOUTPUT_16tof);
     if (nn->n_outputs % NUM_METADATA_PER_OUTPUT_TENSOR) {
         return errlog(nn,"oops, output # does not have enough metadata %d",nn->n_outputs);
     }
+
+	if(nn->cpuEarlyWakeup){
+		// Wake CPU early
+		if(WAKE_CPU_EARLY){
+			logmsg(nn,2,"Failed to wake the CPU early. Execution resuming...");
+		}
+	}
 
     int num_data_tensors_input = self->n_inputs / NUM_METADATA_PER_QUANTIZED_TENSOR;
     
@@ -2112,22 +2655,29 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
         elements = batches*height*width*depth;
 
         // input type check finds opaque tensors
-        if ((in_tensor->data_size != elements) && (in_tensor->data_size != (elements * sizeof(float)))) {
+        if (in_tensor->data_size == elements) {
+            input_tensor_type = NN_TYPE_QUINT8;
+        }
+        else if (in_tensor->data_size == elements*sizeof(uint16_t)) {
+            input_tensor_type = NN_TYPE_QUINT16;
+        }
+        else if (in_tensor->data_size == elements*sizeof(float)) {
+            input_tensor_type = NN_TYPE_FLOAT;
+        }
+        else {
             return errlog(nn,"input tensor size %d mismatch with num elements %d", in_tensor->data_size, elements);
         }
-
-        input_tensor_type = (in_tensor->data_size == elements) ? NN_TYPE_QUINT8 : NN_TYPE_FLOAT;
         in_element_size = tensor_type_size(input_tensor_type);
         needs_dequantization = tensor_get_int32(needs_dequantize_tensor, 0);
         output_tensor_type = needs_dequantization ? NN_TYPE_FLOAT : input_tensor_type;
         out_element_size = tensor_type_size(output_tensor_type);
 
-        if (input_tensor_type == NN_TYPE_FLOAT && output_tensor_type == NN_TYPE_QUINT8) {
+        if (input_tensor_type == NN_TYPE_FLOAT && output_tensor_type != NN_TYPE_FLOAT) {
             return errlog(nn,"output quantization not supported");
         }
 
         if (needs_dequantization) {
-            if (input_tensor_type != NN_TYPE_QUINT8 || output_tensor_type != NN_TYPE_FLOAT) {
+            if (((input_tensor_type != NN_TYPE_QUINT8) && (input_tensor_type != NN_TYPE_QUINT16)) || output_tensor_type != NN_TYPE_FLOAT) {
                 return errlog(nn,"dequantize requested on in data size %d elements %d in type %d out type %d",
                         in_tensor->data_size, elements, input_tensor_type, output_tensor_type);
             }
@@ -2146,24 +2696,12 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
         // set min/maxes
         minval = tensor_get_float(in_min_tensor, 0);
         maxval = tensor_get_float(in_max_tensor, 0);
-		float range = fmaxf(1e-18f, maxval-minval);
-		float stepsize = flt_div_255(range);
-		// the hvx code will quietly generate nonsense if stepsize is infeasible...
-		// it must be in range 2**-126 <= step < 2**120 to ensure results are
-		// all in 'normal' range.
-		if(stepsize <0.f || stepsize >=0x2.0p120 ){
-			return errlog(nn,"infeasible quantization step: %.6g",stepsize);
-		}
-		if( stepsize < 0x1.0p-126 ){
-			logmsg(nn,0,"dequant with stepsize = %.6g: filling with zero", stepsize);
-			memset(out_tensor->data, 0, elements*sizeof(float));
-			return 0;
-		}
-
         tensor_set_float(out_min_tensor, 0, minval);
         tensor_set_float(out_max_tensor, 0, maxval);
 
         if (!(out_tensor->max_size >= (elements*out_element_size))){
+        	if (is_u16)
+        		return errlog(nn, "output_dequantize_execute_with_info 16bit is not supported.");
         	struct output_fill_runstate output_runstate;
         	output_runstate.in_tensor = in_tensor;
         	output_runstate.out_tensor = out_tensor;
@@ -2187,29 +2725,7 @@ static int output_dequantize_execute_opt(struct nn_node *self, struct nn_graph *
 
 		if (needs_dequantization)
 		{
-			struct dequant_runstate rstate;
-			rstate.inp = in_tensor->data;
-			rstate.outp = out_tensor->data;
-			rstate.numel = elements;
-			rstate.qstep = stepsize;
-			rstate.qzero = saturate_u8(roundf_i32(-minval/stepsize));
-			nn_sem_init( &rstate.done_sem,0);
-
-			// figure out the chunking...
-			unsigned nvec = (elements+127)/128u;	// number of vectors in all
-			// each 256 vectors converted means 128Kb of stores; we don't want to be
-			// larger that that, otherwise the stores to L2 cache could evict the ongoing
-			// prefetch.
-			unsigned chunk = 256;
-			if( nvec < 512){		// split to two
-				chunk = (nvec < 32)?nvec : ((nvec+1)>>1);
-			}
-			rstate.chunk = 128*chunk;		// in bytes
-			rstate.current_pos = 0;
-			int nthreads =  (nvec >(NUM_THREADS-1)*chunk)?NUM_THREADS: (nvec + (chunk-1))/chunk;
-			for( int i =0; i < nthreads;i++)
-				nn_os_work_for_vector( nn, dequantize_hvx_work_func, &rstate);
-			nn_sem_wait_n_times( &rstate.done_sem, nthreads);
+			dequantize_work(nn, in_tensor, in_min_tensor, in_max_tensor, out_tensor, is_u16);
 		}
 		else
 		{
@@ -2252,6 +2768,24 @@ static int output_dequantize_check(struct nn_node *self, struct nn_graph *nn)
 // IN: nn->output[i * NUM_METADATA_PER_OUTPUT_TENSOR + 3]: !!! SPECIAL CASE: read needs_dequantization from output def
 
 struct nn_node_ops nn_ops_for_DequantizeOUTPUT_8tof = {
+    .execute = output_dequantize_execute_opt,
+    .check = output_dequantize_check,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT_GE(0),
+    .n_outputs = NN_IOCOUNT_GE(0),
+};
+
+// where i is the tensor index:
+// IN: self->input[i * NUM_METADATA_PER_QUANTIZED_TENSOR + 0]: TF16 data
+// IN: self->input[i * NUM_METADATA_PER_QUANTIZED_TENSOR + 1]: float min
+// IN: self->input[i * NUM_METADATA_PER_QUANTIZED_TENSOR + 2]: float max
+// OUT: nn->output[i * NUM_METADATA_PER_OUTPUT_TENSOR + 0]: output data in either TF16 or float
+// OUT: nn->output[i * NUM_METADATA_PER_OUTPUT_TENSOR + 1]: float min or 0
+// OUT: nn->output[i * NUM_METADATA_PER_OUTPUT_TENSOR + 2]: float max or 0
+// IN: nn->output[i * NUM_METADATA_PER_OUTPUT_TENSOR + 3]: !!! SPECIAL CASE: read needs_dequantization from output def
+
+struct nn_node_ops nn_ops_for_DequantizeOUTPUT_16tof = {
     .execute = output_dequantize_execute_opt,
     .check = output_dequantize_check,
     .ctor = node_alloc_common,

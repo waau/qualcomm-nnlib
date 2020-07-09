@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -244,7 +244,7 @@ static int reduction_execute(struct nn_node *self, struct nn_graph *nn, int redu
     int32_t modified_data_size = 1;
 
     // Handle negative axes by re-interpreting them as positive axes
-    if( handle_negative_axes(nn, axes_ori, axes_size)!=0) return -1;
+    if( handle_negative_axes(nn, axes_ori, axes_size)!=0) return errlog(nn," error in handle_negative_axes()");
 
     // Remove duplicate axes
     int32_t distinctive_axes_size=0;

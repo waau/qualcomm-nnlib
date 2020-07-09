@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -179,7 +179,7 @@ static int nn_graphloop_sort_partitions( struct nn_graph * nn);
 
 static inline int inref_set_init(struct inref_set *tp, int n ){
 	tp->tbl = nn_malloc( n*sizeof(struct input));
-	if( tp->tbl == NULL) return -1;
+	if( tp->tbl == NULL) return errlog(NULL, "inref_set_init() failed to malloc buffer");
 	tp->size = 0;
 	tp->alloc = n;
 	return 0;
@@ -220,7 +220,7 @@ inref_set_insert_slowpath(struct inref_set *tp, struct input const * newin )
 		int add_to = (tp->alloc < 512)? tp->alloc: 512;
 		int newalloc = tp->alloc + add_to;
 		void * newmem = nn_realloc( tp->tbl, sizeof(struct input)*newalloc );
-		if( newmem == NULL) return -1;
+		if( newmem == NULL) return errlog(NULL,"inref_set_insert_slowpath() failed to realloc buffer");
 		tp->alloc = newalloc;
 		tp->tbl = newmem;
 	}
@@ -568,7 +568,7 @@ nn_graphloop_prepare_graph( struct nn_graph * nn)
 	return result;
  fail:
 	inref_set_free(&needsink);
-	return -1;
+	return errlog(NULL,"error in nn_graphloop_prepare_graph() ");
 }
 
 // This is called if nn_graphloop_prepare_graph finds that there are some nodes which are

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -361,7 +361,7 @@ static int slice_run(struct nn_node *self, struct nn_graph *nn) {
 			typecode = NN_TYPE_QUINT8;
 			elbytes = sizeof(uint8_t);
 		}
-		if( slice_prepare(self,nn,elbytes, typecode)!=0) return -1;
+		if( slice_prepare(self,nn,elbytes, typecode)!=0) return errlog(nn,"error in slice_prepare() ");
 		thrinfo = (slice_thread_info*)self->opaque;
 	}
 	int num_threads = thrinfo[0].num_threads;
@@ -389,7 +389,7 @@ static int slice_run_f(struct nn_node *self, struct nn_graph *nn) {
 			typecode = (self->node_type == OP_Slice_f)? NN_TYPE_FLOAT: NN_TYPE_INT32;
 			elbytes = (self->node_type == OP_Slice_f)? sizeof(float): sizeof(int32_t);
 		}
-		if( slice_prepare(self,nn,elbytes, typecode)!=0) return -1;
+		if( slice_prepare(self,nn,elbytes, typecode)!=0) return errlog(nn,"error in slice_prepare()");
 		thrinfo = (slice_thread_info*)self->opaque;
 	}
 	int num_threads = thrinfo[0].num_threads;

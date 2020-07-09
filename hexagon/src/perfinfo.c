@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -117,7 +117,7 @@ int do_perfinfo_get(struct nn_graph *nn, struct perfinfo *info, uint32_t info_le
 	struct nn_node *node;
 	uint32_t i = 0;
 	for (node = nn->head; node != NULL; node = node->next) {
-		if (i >= info_len) return -1;
+		if (i >= info_len) return errlog(nn,"index out of bound");
 		if( node->node_type != OP_Const){
 			info[i].node_id = node->node_id;
 			info[i].executions = node->executions;

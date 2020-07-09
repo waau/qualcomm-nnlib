@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -71,7 +71,9 @@
 #define OUT_MIN_IDX         1
 #define OUT_MAX_IDX         2
 #define OUT_MIN             -1
-#define OUT_MAX             1
+#define OUT_MAX             (127.0/128.0)
+#define SCALE_UP_14         16384// 2^14
+#define SCALE_UP_15         32768// 2^15
 
 //process one slice of data along an axis. If the axis is w, process w x d slice. If the axis is h, process h x d slice.
 //stride is inner stride
@@ -249,7 +251,7 @@ static inline void hvx_l2norm_in_rows(struct nn_graph *nn, const uint8_t* in_dat
         squared_l2_norm = *(uint32_t *)&sum;
         const float l2_norm = sqrtf(squared_l2_norm);
 
-        // x / l2_norm = ( x * 2^15 / l2_norm_mantissa ) >> (8+rsh)
+        // x / l2_norm = ( x * 2^14 / l2_norm_mantissa ) >> (7+rsh)
         int rsh = floor_log2(l2_norm);    //get the bits of the exponent of l2_norm.
         if(0.0 == l2_norm) {
             HVX_Vector out_offset = q6op_Vb_vsplat_R(out_0_off);
@@ -258,7 +260,20 @@ static inline void hvx_l2norm_in_rows(struct nn_graph *nn, const uint8_t* in_dat
             continue;
         }
 
-        int frac = ((unsigned)32768/ (unsigned) l2_norm) << rsh;  //2^15/l2_norm_mantissa
+        int frac, tmp;
+        // Instead of computing x_i / L2norm for each x_i. We scale up 1/l2norm by 2^14 or 2^15 and multiply instead.
+        // We then shift back by >> 7+rsh to leave 8 bits in the result.
+        // If l2norm is large it can create rounding error, so we can split the l2norm into its mantissa and exponent bits
+        // the exponent bits are accounted for in the rsh.
+        // If 2^15 / l2norm_mantissa ends up being 2^15 it will flip the sign bits of each result.
+        // To avoid that we use 2^14 in those cases.
+        if ((unsigned)( SCALE_UP_15 / l2_norm) << rsh == SCALE_UP_15) {
+            frac = (unsigned)( SCALE_UP_14 / l2_norm) << rsh;  //2^14/l2_norm_mantissa
+            tmp = rsh + 7;
+        } else {
+            frac = (unsigned)( SCALE_UP_15 / l2_norm) << rsh;  //2^15/l2_norm_mantissa
+            tmp = rsh + 8;
+        }
         frac = Q6_R_combine_RlRl(frac, frac);
 
         for( int i =0; i < vecs_across; i++) { //traverse along depth until getting the sum of the whole depth row
@@ -270,7 +285,6 @@ static inline void hvx_l2norm_in_rows(struct nn_graph *nn, const uint8_t* in_dat
             HVX_VectorPair mul_diff_lo = Q6_Ww_vmpy_VhRh( Q6_V_lo_W(diff_pair), frac);  //(tmp_out * frac)
             HVX_VectorPair mul_diff_hi = Q6_Ww_vmpy_VhRh( Q6_V_hi_W(diff_pair), frac);
 
-            int tmp = rsh +8;
             HVX_Vector shift_hi = Q6_Vw_vasr_VwR(Q6_V_hi_W(mul_diff_lo), tmp);
             HVX_Vector shift_lo = Q6_Vw_vasr_VwR(Q6_V_lo_W(mul_diff_lo), tmp);
             HVX_VectorPair shuff = Q6_W_vshuff_VVR(shift_hi, shift_lo, -4);

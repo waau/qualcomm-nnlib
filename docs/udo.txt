@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -59,9 +59,10 @@ teardown of all graphs with UDO nodes, UDO libraries need to be released from He
 
 HexNN API’s for UDO Feature
 
-•	Int hexagon_nn_udo_register_lib (const char* so_path_name, hexagon_nn_udo_err* err)
+•	Int hexagon_nn_register_udo_lib (const char* so_path_name, uint32_t* udo_lib_registration_id, hexagon_nn_udo_err* err)
 	o	Used for registering each UDO library to HexNN
 	o	UDO implementation library path (relative to ADSP_LIBRARY_PATH) and name need to be provided as a string
+	o       Returns a registration ID which can be used later in hexagon_nn_free_udo_individual_lib
 
 •	Int hexagon_nn_append_udo_node ( nn_id_t id, uint32_t node_id, const char* package_name, char* op_type, 
         char* flattened_static_params, uint32_t flattened_static_params_size, const struct input* inputs, 
@@ -70,8 +71,8 @@ HexNN API’s for UDO Feature
 	o	Package name and op type in parameters must match descriptions defined in UDO implementation libraries
 	o	static parameters for UDO nodes should be passed in flattened format (more descriptions below)
 
-•	Int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo_err* err)
-	o	Used for releasing and un-registering one UDO implementation library specified by package name
+•	Int hexagon_nn_free_udo_individual_lib (uint32_t udo_lib_registration_id, hexagon_nn_udo_err* err)
+	o	Used for releasing and un-registering one UDO implementation library specified by registration ID
 	o	Freeing of a UDO library should only happen after its retirement, i.e. a UDO library shall only 
                 be freed after all HexNN graphs with UDO nodes from this UDO library have been torn down
 
@@ -90,25 +91,23 @@ UDO Implementation Library
 
 UDO implementation libraries are runtime specific libraries that contains implementation of user defined operations. 
 UDO header files located in interface/SnpeUdo/ directory defines standardized data structs and function interfaces that 
-each UDO implementation library need to deploy. HexNN UDO implementation libraries should include UdoImplDspHexNNv2.h 
-header file and provide definitions of functions declared in UdoImplDspHexNNv2.h, UdoShared.h and UdoImpl.h. Note that 
+each UDO implementation library need to deploy. HexNN UDO implementation libraries should include UdoImplDsp.h 
+header file and provide definitions of functions declared in UdoImplDsp.h, UdoShared.h and UdoImpl.h. Note that 
 SnpeUdo_setOpIO function and SnpeUdo_profileOp function declared in UdoImpl.h are currently not used in HexNN, thus 
 function definitions are not required in HexNN v2 UDO implementation libraries. Each HexNN v2 implementation library 
 should have a unique package name defined in the library itself.
 
 Before inserting UDO nodes into HexNN, each implementation library requires HexNN registration using 
-hexagon_nn_udo_register_lib API with the path (relative to ADSP_LIBRARY_PATH) and name of the shared object (.so).
+hexagon_nn_register_udo_lib API with the path (relative to ADSP_LIBRARY_PATH) and name of the shared object (.so).
 
 
 --------------------------------------------------------------------------------------------------------------
 
 
-UDO Implementation Library ID
+UDO Implementation Library PackageName and ID
 
 UDO package name defined in each HexNN v2 UDO implementation library serves as a unique identification for that 
-UDO implementation library. Package name is used in hexagon_nn_append_udo_node and hexagon_nn_free_udo_individual_lib
-function calls. The package names being registered in one process are expected to be unique. 
-When trying to register a UDO library with a package name that has already been registered, 
+UDO implementation library. Package name is used in hexagon_nn_append_udo_node. Upon registration, an UDO lib registration ID is returned, and the same registration ID shall be used to identify UDO library in hexagon_nn_free_udo_individual_lib. The package names and registration ID being registered in one process are expected to be unique. When trying to register a UDO library with a package name that has already been registered, 
 UDO_LIB_ALREADY_REGISTERED error code will be returned, and no additional UDO library will be registered. 
 However, UDO implementation is responsible for taking care of the cases when SnpeUdo_initImplLibrary is 
 called more than once, UDO implementation libraries should make sure no memory leak and thread-safe.
@@ -120,7 +119,7 @@ called more than once, UDO implementation libraries should make sure no memory l
 UDO Standard Header Files
 
 UDO header files are located in interface/SnpeUdo/ directory. HexNN UDO implementation libraries should include 
-UdoImplDspHexNNv2.h and provide function definitions for functions declared in UdoShared.h, UdoImpl.h and UdoImplDspHexNNv2.h.
+UdoImplDsp.h and provide function definitions for functions declared in UdoShared.h, UdoImpl.h and UdoImplDsp.h.
 
 UdoBase.h
 •	Defines enums and structs used in UDO implementation library and UDO registration library(optional library for HexNN v2)
@@ -133,7 +132,7 @@ UdoImpl.h
 •	Defines structs and function interfaces for UDO implementation library
 •	Includes UdoShared.h
 
-UdoImplDspHexNNv2.h
+UdoImplDsp.h
 •	Defines structs and function interfaces specifically for HexNN v2 UDO implementation library
 •	Includes UdoImpl.h
 
@@ -144,7 +143,7 @@ UdoImplDspHexNNv2.h
 Infrastructure Functions Supported By HexNN
 
 HexNN supports some functionalities and provides them to UDO implementation library as a global infrastructure. 
-These function interfaces are defined in UdoImplDspHexNNv2.h file. 
+These function interfaces are defined in UdoImplDsp.h file. 
 
 •	udoSetOutputTensorSize (void* perOpInfrastructure, uint32_t outIdx, uint32_t size)
 	o	For each output tensor of an operation instance, current tensor size needs to be set explicitly during execute
@@ -187,6 +186,12 @@ These function interfaces are defined in UdoImplDspHexNNv2.h file.
 	o	vtcm is only ready for use if vtcm pointer is not NULL regardless of the vtcm size
 	o	vtcm is only available for use during execution time of operations, i.e. SnpeUdo_executeOp
 
+•	udoVtcmIsReal(void* perOpInfrastructure)
+	o	returns 1 if vtcm is "real" VTCM and not "fake"
+	o	"fake" vtcm is something that can occur on V65 targets only.  It is actually just regular memory.
+	o	Operations that require real VTCM (like vscatter for example) cannot work on "fake" vtcm and should
+                should not be used unless this API returns 1.
+
 •	udoRunWorkerThreads (void* perOpInfrastructure, uint32_t nThreads, workerThread_t w, void* userData)
 	o	HexNN multithreading functionality
 	o	Calls user provided function w with parameter userData using nThreads number of threads
@@ -194,7 +199,7 @@ These function interfaces are defined in UdoImplDspHexNNv2.h file.
                 these numbers will be bounded to corresponding max number of threads of certain SOC's
 	o	Returns when all threads are done
 	o	Required for using HVX 
-	o	Function w needs to follow workerThread_t function interface defined in UdoImplDspHexNNv2.h 
+	o	Function w needs to follow workerThread_t function interface defined in UdoImplDsp.h 
 
 
 --------------------------------------------------------------------------------------------------------------
@@ -335,8 +340,8 @@ In directory udo/
 Instructions for building and running test app on device:
    Build udoExampleImplLib.so for DSP: 
       cd udo/
-      make tree_clean V=hexagon_Release_dynamic_toolv82_v65
-      make tree V=hexagon_Release_dynamic_toolv82_v65
+      make tree_clean V=hexagon_Release_dynamic_toolv83_v65
+      make tree V=hexagon_Release_dynamic_toolv83_v65
    Build sample udo executable:
       cd (HEXNN-ROOT-DIRECTORY)
       make VERBOSE=1 V=android_Release_aarch64 CDSP_FLAG=1 UDO_SAMPLE_EXE=1 tree

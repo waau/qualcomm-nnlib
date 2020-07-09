@@ -1,6 +1,6 @@
 //==============================================================================
 //
-// Copyright (c) 2019 Qualcomm Technologies, Inc.
+// Copyright (c) 2019-2020 Qualcomm Technologies, Inc.
 // All Rights Reserved.
 // Confidential and Proprietary - Qualcomm Technologies, Inc.
 //
@@ -16,11 +16,17 @@ extern "C"
 {
 #endif
 
+/** @addtogroup c_plus_plus_apis C++
+@{ */
+
 /**
- * @brief A function to return the various versions
- *        The function returns a struct containing the library version, API version and more
+ * @brief A function to return the various versions as they relate to the UDO
+ *        The function returns a struct containing the the following:
+ *        libVersion: the version of the implementation library compiled for the UDO. Set by user
+ *        apiVersion: the version of the UDO API used in compiling the implementation library.
+ *        Set by SNPE
  *
- * @param[in, out] version A pointer to Version struct of type snpeLibraryVersion
+ * @param[in, out] version A pointer to Version struct of type SnpeUdo_LibVersion_t
  *
  * @return Error code
  *
@@ -35,5 +41,6 @@ typedef SnpeUdo_ErrorType_t
 } // extern "C"
 #endif
 
-#endif // SNPE_UDO_SHARED_H
+/** @} */ /* end_addtogroup c_plus_plus_apis C++ */
 
+#endif // SNPE_UDO_SHARED_H

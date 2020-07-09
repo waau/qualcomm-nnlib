@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -98,7 +98,7 @@ static inline void do_quantized_add_888(
 	int16_t *ptr_max;
 	if ((ptr_max = nn_scratch_alloc(nn, 256)) == NULL)
 	{
-		errlog(nn, "scratch alloc fail");
+		errlog(nn, "scratch_alloc fail");
 		return;
 	}
 	short ialpha = 128.0f * alpha;
@@ -212,7 +212,7 @@ static int qadd_888_hvx(struct nn_graph *nn, void *vself)
 
 	/* Handle broadcasting */
 	if (!are_dims_compatible(a_tensor->shape, b_tensor->shape))
-		return errlog(nn, "incompatible shapes");
+		return errlog(nn, "incompatible shapes of a_tensor , b_tensor");
 	total_shape.batches = output_dim(a_tensor->shape.batches, b_tensor->shape.batches);
 	total_shape.height = output_dim(a_tensor->shape.height, b_tensor->shape.height);
 	total_shape.width = output_dim(a_tensor->shape.width, b_tensor->shape.width);
@@ -301,9 +301,9 @@ static int qadd_888_execute(struct nn_node *self, struct nn_graph *nn)
 	if (a_tensor->data_size > out_tensor->max_size) return errlog(nn,"out too small");
 #endif
 	if (sizeof(float) > out_min_tensor->max_size)
-		return errlog(nn, "min too small");
+		return errlog(nn, "out_min_tensor->max_size < sizeof(float)");
 	if (sizeof(float) > out_max_tensor->max_size)
-		return errlog(nn, "max too small");
+		return errlog(nn, "out_max_tensor->max_size < sizeof(float)");
 	out_min_tensor->data_size = sizeof(float);
 	out_max_tensor->data_size = sizeof(float);
 
@@ -571,7 +571,7 @@ addsub_flat_direct_execute(struct nn_node *self, struct nn_graph *nn)
 		if (res <= 0)
 		{
 			if (res < 0)
-				return -1;
+				return errlog(nn,"error in function check_addsub_need_rerun() ,ret val = %d  ",res);
 			break;
 		}
 		runstate.need_minmax = 0; // don't need to range check second run.
@@ -657,7 +657,7 @@ check_addsub_need_rerun(struct nn_graph *nn, struct addsub_flat_direct_runstate 
 	//printf("rerange to %f  ... %f\n", info->out_min, info->out_max);
 	int res = set_addsub_scaling_for_output_range(info, &rstp->osp, 0);
 	if (res < 0)
-		return -1;
+		return errlog(nn,"error in set_addsub_scaling_for_output_range()= %d ",res);
 	return 1;
 }
 
@@ -934,7 +934,7 @@ set_addsub_scaling_for_output_range(struct qadd_888_info *info, struct addsub_sc
 	//
 	int scexp = flt_getexp(scaleval * (float)(16384. / 16380.));
 	if (scexp > 6 && (!fixed_range || scexp > 12)) // req. scale is too large
-		return -1;
+		return errlog(NULL,"req. scale is too large ,scexp =%d",scexp);
 	int rsh = min_i32(6 - scexp, 7); // should be 0..6 (maybe 7 sometimes)
 
 	// important: rsh=0 is 'underrange' when fixed_range, and not otherwise (this lets us get

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,9 +35,17 @@
  */
 #include <nn_graph.h>
 #include <string.h>
+#include "bitonic_sort.h"
+
+#if __HEXAGON_ARCH__ >= 62
+#define FALLBACK 0
+#else
+#define FALLBACK 1
+#endif
 
 #define NUM_VALUES_IN_BYTE 256
 #define MAX_BYTE_VALUE 255
+#define MAX_NUM_ELEMENTS 8388608
 
 // finds topk with a histogram and a map
 // to find top k, we need the values of sorted in decreasing order, and use index value(in increasing order) to break ties
@@ -83,71 +91,82 @@ static int topk_8_execute(struct nn_node *self, struct nn_graph *nn){
     if(tensor_set_single_float(output_max_tensor, tensor_get_float(input_max_tensor,0))){
         return errlog(nn,"max too small");
     }
-
-    int32_t byte_count_histogram[NUM_VALUES_IN_BYTE] = {0};
-    int32_t* byte_count_histogram_last_ptr = byte_count_histogram + MAX_BYTE_VALUE;
-    int32_t map_bucket_size = k*sizeof(int32_t);
-    int32_t map_size = map_bucket_size*NUM_VALUES_IN_BYTE;
-    if (nn_scratch_grow(nn,map_size)){
-        return errlog(nn,"scratch too small");
+    if( (row_size > MAX_NUM_ELEMENTS) && (k <= 32) ){
+        // for k <= 32 case, the indices are stored in 23 bit buffers,
+        // hence maximum number of elements is 2^23 = 8388608
+        return errlog(nn,"number of elements in a single batch exceeds MAX_NUM_ELEMENTS");
     }
-    int32_t* byte_index_map = nn->scratch;
-    for (int b=0; b<batch_size; b++, in_val+=row_size){
-        //start from the end of the row
-        const uint8_t * in_val_row = in_val+row_size-1;
 
-        //zero out the memory before traversing the row again
-        memset(byte_index_map,0,map_size);
-        memset(byte_count_histogram,0,sizeof(byte_count_histogram));
 
-        //read row front to back, to make larger indices appear first
-        for (int r = row_size -1; r >=0; r--, in_val_row--){
-            cur_depth_idx = r;
-            uint8_t histogram_byte_key = *in_val_row;
-            int32_t* byte_count_ptr = byte_count_histogram+histogram_byte_key;
-            int32_t byte_count = *byte_count_ptr;
-
-            if (byte_count<k){
-                int32_t* idx_in_map_ptr = byte_index_map+(k*histogram_byte_key)+byte_count;// the 
-                *idx_in_map_ptr=cur_depth_idx;
-                *byte_count_ptr=byte_count+1;
-            }else if(histogram_byte_key == MAX_BYTE_VALUE){// shortcutting if k 255s found
-                break;
-            }
-            
+    if ( k <= 32 && !FALLBACK ){
+        find_best_K_max32_of_u8_bitonic_sort( (uint8_t*)input_val_tensor->data, row_size, (uint8_t*)out_val_tensor->data, (int32_t*)out_idx_tensor->data, k, batch_size);
+    }
+    else{
+        int32_t byte_count_histogram[NUM_VALUES_IN_BYTE] = {0};
+        int32_t* byte_count_histogram_last_ptr = byte_count_histogram + MAX_BYTE_VALUE;
+        int32_t map_bucket_size = k*sizeof(int32_t);
+        int32_t map_size = map_bucket_size*NUM_VALUES_IN_BYTE;
+        if (nn_scratch_grow(nn,map_size)){
+            return errlog(nn,"scratch too small");
         }
+        int32_t* byte_index_map = nn->scratch;
+        for (int b=0; b<batch_size; b++, in_val+=row_size){
+            //start from the end of the row
+            const uint8_t * in_val_row = in_val+row_size-1;
 
-        if(*byte_count_histogram_last_ptr==k) {//if shortcutted above
-            memset(out_val,MAX_BYTE_VALUE,k);
-            memcpy(out_idxs,byte_index_map+k*MAX_BYTE_VALUE,map_bucket_size);
-            out_val+=k;
-            out_idxs+=k;
-            continue;
-        }
+            //zero out the memory before traversing the row again
+            memset(byte_index_map,0,map_size);
+            memset(byte_count_histogram,0,sizeof(byte_count_histogram));
 
-        int32_t remaining=k;
-        int32_t* byte_count_ptr = byte_count_histogram_last_ptr;
-        int32_t* idx_in_map_ptr = byte_index_map+k*MAX_BYTE_VALUE;
-        //traverse the histogram and map backwards, and write to the output while there's space to write
-        //start from 255, end at 0, while not all k values written to output
-        for (int byte = MAX_BYTE_VALUE; remaining > 0 && byte >= 0  ; byte--){
-            int32_t byte_count =*byte_count_ptr;
-            int32_t copy_len = (remaining > byte_count)? byte_count:remaining;
-            if(byte_count > 0){
-                remaining-=copy_len;
+            //read row front to back, to make larger indices appear first
+            for (int r = row_size -1; r >=0; r--, in_val_row--){
+                cur_depth_idx = r;
+                uint8_t histogram_byte_key = *in_val_row;
+                int32_t* byte_count_ptr = byte_count_histogram+histogram_byte_key;
+                int32_t byte_count = *byte_count_ptr;
 
-                //since its the same byte value, just write it over and over again
-                memset(out_val,byte,copy_len);
-
-                //the indices are already in increasing order in the map, so just copy them
-                memcpy(out_idxs,idx_in_map_ptr,copy_len*sizeof(int32_t)); 
-
-                out_val+=copy_len;
-                out_idxs+=copy_len;
+                if (byte_count<k){
+                    int32_t* idx_in_map_ptr = byte_index_map+(k*histogram_byte_key)+byte_count;// the 
+                    *idx_in_map_ptr=cur_depth_idx;
+                    *byte_count_ptr=byte_count+1;
+                }else if(histogram_byte_key == MAX_BYTE_VALUE){// shortcutting if k 255s found
+                    break;
+                }
+                
             }
-            //traverse pointer backwards
-            byte_count_ptr--;
-            idx_in_map_ptr-=k;
+
+            if(*byte_count_histogram_last_ptr==k) {//if shortcutted above
+                memset(out_val,MAX_BYTE_VALUE,k);
+                memcpy(out_idxs,byte_index_map+k*MAX_BYTE_VALUE,map_bucket_size);
+                out_val+=k;
+                out_idxs+=k;
+                continue;
+            }
+
+            int32_t remaining=k;
+            int32_t* byte_count_ptr = byte_count_histogram_last_ptr;
+            int32_t* idx_in_map_ptr = byte_index_map+k*MAX_BYTE_VALUE;
+            //traverse the histogram and map backwards, and write to the output while there's space to write
+            //start from 255, end at 0, while not all k values written to output
+            for (int byte = MAX_BYTE_VALUE; remaining > 0 && byte >= 0  ; byte--){
+                int32_t byte_count =*byte_count_ptr;
+                int32_t copy_len = (remaining > byte_count)? byte_count:remaining;
+                if(byte_count > 0){
+                    remaining-=copy_len;
+
+                    //since its the same byte value, just write it over and over again
+                    memset(out_val,byte,copy_len);
+
+                    //the indices are already in increasing order in the map, so just copy them
+                    memcpy(out_idxs,idx_in_map_ptr,copy_len*sizeof(int32_t)); 
+
+                    out_val+=copy_len;
+                    out_idxs+=copy_len;
+                }
+                //traverse pointer backwards
+                byte_count_ptr--;
+                idx_in_map_ptr-=k;
+            }
         }
     }
     return 0;

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -71,6 +71,11 @@ void nn_os_vector_init()
 		h2_vecaccess_init(&vecstate,H2_VECACCESS_HVX_128);
 	}
 	
+}
+
+int nn_os_send_early_wakeup(uint32_t early_hint_value)
+{
+	return 0;
 }
 
 #if __HEXAGON_ARCH__ == 68
@@ -176,6 +181,7 @@ int nn_os_vtcm_acquire(struct nn_graph *nn) {
 	logmsg(nn,0,"vtcm_base 0x%p\n",nn_os_get_vtcm(nn) );
         nn->vtcm_ptr = (void *)VTCM_ADDRESS;
 #else
+        nn->vtcm_is_real = 1;
         nn->vtcm_ptr = (void *)nn_os_get_vtcm(nn);
 	logmsg(nn,1,"vtcm_base 0x%p", nn->vtcm_ptr);
 #endif
@@ -190,6 +196,7 @@ int nn_os_vtcm_acquire(struct nn_graph *nn) {
 int nn_os_vtcm_release(struct nn_graph *nn) {
 	nn->vtcm_ptr = NULL;
 	nn->vtcm_size = 0;
+        nn->vtcm_is_real = 0;
         return 0;
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -354,7 +354,7 @@ static int
 heatmap_maxpk_execute( struct nn_node *self, struct nn_graph *nn )
 {
 	int is_qu8 = 0;
-	if( check_heatmap_maxpk_strategy(nn,self,is_qu8)!= 0 ) return -1;
+	if( check_heatmap_maxpk_strategy(nn,self,is_qu8)!= 0 ) return errlog(nn," error in check_heatmap_maxpk_strategy()");
 
 	struct heatmap_maxpk_info * info = (struct heatmap_maxpk_info*)self->opaque;
 
@@ -644,7 +644,7 @@ static int
 heatmap_maxpk_execute_8( struct nn_node *self, struct nn_graph *nn )
 {
 	int is_qu8 = 1;
-	if( check_heatmap_maxpk_strategy(nn,self,is_qu8 )!= 0 ) return -1;
+	if( check_heatmap_maxpk_strategy(nn,self,is_qu8 )!= 0 ) return errlog(nn," error in check_heatmap_maxpk_strategy() ");
 
 	struct tensor const *in_min_tensor = self->inputs[1];
 	struct tensor const *in_max_tensor = self->inputs[2];

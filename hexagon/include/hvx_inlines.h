@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -501,6 +501,7 @@ static HVX_INLINE_ALWAYS void q6op_scatter_release_A( volatile void * addr )
 //
 
 // these are in hvx_constants.c
+extern const uint8_t const_Count32W[128] __attribute__((aligned(128))); /// {0..31} in words
 extern const uint8_t const_Count128[128] __attribute__((aligned(128)));	/// {0..127}
 extern const uint8_t const_Count64[128] __attribute__((aligned(128)));	/// {0..63, 0..63}
 extern const uint8_t const_Count32[128] __attribute__((aligned(128)));	/// {0..31, 0..31, 0..31, 0..31}
@@ -964,6 +965,17 @@ int vextract_i32( HVX_Vector v, int pos){
 	return uu.as_i32[pos & 31];
 }
 
-
+static inline 
+HVX_Vector hvx_table_lookup_u8( HVX_Vector vin, HVX_Vector lut0, HVX_Vector lut1){   
+    HVX_Vector vout =  q6op_Vb_vlut32_VbVbI( vin,lut0, 0 );
+    vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,1);
+    vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,2);
+    vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut0,3);
+    vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,4);
+    vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,5);
+    vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,6);
+    vout = q6op_Vb_vlut32or_VbVbVbI( vout, vin, lut1,7);
+    return vout;
+}
 
 #endif /* HVX_INLINES_H_ */

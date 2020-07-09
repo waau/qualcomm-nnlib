@@ -120,14 +120,53 @@ void vmemcpy_2d_general_asm(
 
 // Like the above, but with built in prefetching
 
-void vmemcpy_2d_general_with_prefetch( 
-        int width, 
+void vmemcpy_2d_general_with_prefetch(
+        int width,
         int height,
-        void * dst, 
+        void * dst,
         int d_stride,
-        void const * src, 
+        void const * src,
         unsigned s_stride);
+//
+// alternate vmemcpy_2d: width must be <=256
+//  -not supported on V60
+//  - tends to be much faster than 2d_general, when height is small
+//   and/or stride alignments are poor
+//
+#if __HEXAGON_ARCH__ >= 62
+void vmemcpy_2d_short_general(
+      unsigned wid,                     // bytes wide, <= 256
+      unsigned ht,                      // rows
+      void *dst,                        // destination address, any allowed
+      int dst_pitch,            // row pitch of dest; any allowed
+      void const *src,          // source address, any allowed
+      int src_pitch);           // row pitch of source; any allowed
+#else
+static inline void vmemcpy_2d_short_general(
+      unsigned wid,                     // bytes wide, <= 256
+      unsigned ht,                      // rows
+      void *dst, int dst_pitch, void const *src, int src_pitch)
+{
+    vmemcpy_2d_general_asm( wid,ht,dst,dst_pitch,src,src_pitch);
+}
+#endif
 
+
+#if __HEXAGON_ARCH__ >= 62
+// 3d memcpy :  same as vmemcpy_2d_short_general with
+// a loop around it: ht * wid copies, each of 'depth' bytes
+//
+void vmemcpy_3d_short_general(
+    void       *dst,        // destination address, any allowed
+    void const *src,        // source address, any allowed
+    int        dst_pitch_h, // row pitch of dest; any allowed
+    int        src_pitch_h, // row pitch of src; any allowed
+    int        dst_pitch_w, // col pitch of dest; any allowed
+    int        src_pitch_w, // col pitch of src; any allowed
+    int        ht,          // rows
+    int        wid,         // cols
+    int        depth);      // bytes per; <= 256
+#endif
 
 // 2d vector memset: stride must be a multiple of vector, but the
 // start address and width can be arbitrary.

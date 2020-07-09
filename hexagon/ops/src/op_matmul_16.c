@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -46,16 +46,13 @@
 #include <quantize.h>
 #include "hvx_inlines.h"
 #include "op_supernode_procweights.h"
+#include "supernode_clean_cache.h"
 #ifndef __hexagon__
 #include <malloc.h>
 #endif
 #include "nn_const_prep_share.h"
 
-#ifdef HEXAGON_V66
-#define MATMUL_MAX_THREADS 4
-#else
-#define MATMUL_MAX_THREADS 2
-#endif
+#define PAGE_SIZE 0x1000U
 
 /* 8x8 matrix multiply + 32 bias -> 16 bits */
 
@@ -71,7 +68,7 @@
 //     8:  scalar float, max for bias tensor	 (assumed to be const and -min)
 //     9:  scalar float, min for output          (assumed to be const)
 //    10:  scalar float, max for output          (assumed to be const and -max)
-//
+//    11:  gemmsumb tensor, qint32 [1,1,1,d_out]        (optional, if present indicates weights are prepared)
 // In the current form, all inputs are assumed to be const (at least, unchanging) except
 // for the primary input and input range.
 // The bias range and output range are assumed to be symmetric.
@@ -107,6 +104,11 @@ struct matmul_16_info {
 
 	// bias input step
 	float bias_in_step;
+	int use_vtcm;
+	void *vtcm_ptr;
+	struct nn_graph *nn;
+	//Were the weights prepared during optimize?
+	int32_t weights_prepared;
 };
 
 
@@ -127,7 +129,6 @@ struct matmul_16_runstate
 	int32_t total_jobs;					// this is batch_chunks * odepth_chunks
 	volatile int32_t current_job;		// used for threading.
 	nn_sem_t done_sem;
-
 	// A input step and zero
 	float a_in_step;
 	int a_in_zero;
@@ -147,6 +148,15 @@ struct matmul_16_runstate
 	// this points to the per-output offset buffer (in scratch); this is in SOP units,
 	// and combines the bias (scaled) and the b_sums (*-a_in_zero). Also (d_in *a_in_zero*b_in_zero).
 	int32_t * offset_buffer;
+	
+};
+
+struct matmul_16_thread_runstate
+{
+	struct matmul_16_runstate * runstate;
+	uint8_t *thread_vtcm_ptr;
+	uint32_t thread_vtcm_size;
+	uint32_t thread_num;
 };
 
 // to split across threads:
@@ -160,15 +170,20 @@ static int
 matmul_16_setup_info( struct nn_node * self, struct nn_graph *nn)
 {
 	struct matmul_16_info * info = (struct matmul_16_info *)self->opaque;
+	struct tensor const * a_tensor = self->inputs[0];
 	struct tensor const * b_tensor = self->inputs[1];
 	struct tensor const * b_min_tensor = self->inputs[4];
 	struct tensor const * b_max_tensor = self->inputs[5];
 	struct tensor const * bias_tensor = self->inputs[6];
-
+	info->nn = nn;
+	if(self->n_inputs == 12){
+		//Prepared weights version
+		info->weights_prepared = 1u;
+	}
 	if( b_tensor->shape.batches != 1 || b_tensor->shape.height != 1){
 		return errlog(nn,"matmul: bad B shape");
 	}
-	int d_in = b_tensor->shape.width;
+	int d_in = a_tensor->shape.depth;
 	int d_out = b_tensor->shape.depth;
 
 	if( bias_tensor->shape.depth != d_out){
@@ -181,12 +196,22 @@ matmul_16_setup_info( struct nn_node * self, struct nn_graph *nn)
 
 	int d_in_padded = d_in;
 	int d_out_padded = d_out;
+	//Skip if weights were prepared
+	if(info->weights_prepared){
+		info->using_hvx = 1;
+		d_in_padded = b_tensor->shape.width;
+		info->in_depth_padded = b_tensor->shape.width;
+	}
 	// can use hvx if input depth a multiple of 8 and output depth a multiple of 64
-	if( (d_in & 7) == 0  && (d_out&63) == 0 ){
+	else if( (d_in & 7) == 0  && (d_out&63) == 0 ){
+		logmsg(nn, 1, "QuantizedMatMul_8x8p32to16 can use hvx but weights weren't prepared!?");
 		info->using_hvx = 1;
 		d_in_padded = (d_in + 31) & ~31;	// b_repacked is based on this padding.
+		info->in_depth_padded = d_in_padded;
 	}
-	info->in_depth_padded = d_in_padded;
+	else{
+		info->in_depth_padded = d_in_padded;
+	}
 	info->out_depth_padded = d_out_padded;
 
 	// find B input range
@@ -218,7 +243,7 @@ matmul_16_setup_info( struct nn_node * self, struct nn_graph *nn)
 	// convert B input as needed
 	//
 
-	if( info->using_hvx){
+	if( info->using_hvx && !info->weights_prepared){
 		// try to get shared data from the const
 		struct nn_node * wt_nodep = nn_cpshare_get_const_node( nn, self, 1 );
 		if( wt_nodep == NULL ) return errlog(nn,"can't get weights const");
@@ -256,7 +281,9 @@ matmul_16_setup_info( struct nn_node * self, struct nn_graph *nn)
 		info->cpshare_ptr = cpshare;	// retain for later.
 		info->b_sums = cpshare->ptr_sumb;
 		info->b_repacked = cpshare->ptr_w;
-	}else{
+		//Flush data cache
+		supernode_cleaninv_weights(info->b_repacked, d_in_padded*d_out_padded);
+	}else if(!info->using_hvx && !info->weights_prepared){
 		int32_t *bsums_p = nn_memalign(128, sizeof(int32_t)*d_out_padded);
 		if( bsums_p == NULL){
 			return errlog(nn,"alloc failed");
@@ -271,6 +298,11 @@ matmul_16_setup_info( struct nn_node * self, struct nn_graph *nn)
 			}
 			bsums_p[i] = sum;
 		}
+	}else {
+		//Weights were prepared
+		info->b_repacked_outer_stride = d_in_padded*32;
+		info->b_sums = self->inputs[11]->data;
+		info->b_repacked = b_tensor->data;
 	}
 
 	info->run_yet = 1;
@@ -287,7 +319,7 @@ matmul_16_scale_for_run( struct nn_node * self, struct nn_graph *nn, struct matm
 	struct tensor const *a_max_tensor = self->inputs[3];
 	struct tensor const *out_min_tensor = self->inputs[9];
 	struct tensor const *out_max_tensor = self->inputs[10];
-
+	
 
 	rstp->out_shape = a_tensor->shape;
 	rstp->a_tensor = a_tensor;
@@ -402,7 +434,7 @@ static int matmul_16_execute( struct nn_node * self, struct nn_graph * nn)
 	struct matmul_16_info * info = (struct matmul_16_info *)self->opaque;
 	if( !info->run_yet){			// need initial setup
 		if( matmul_16_setup_info(self,nn)!=0){
-			return -1;
+			return errlog(nn,"error in matmul_16_setup_info() ");
 		}
 	}
 	struct matmul_16_runstate runstate;
@@ -410,7 +442,7 @@ static int matmul_16_execute( struct nn_node * self, struct nn_graph * nn)
 
 
 	if ( matmul_16_scale_for_run( self,nn, &runstate)!= 0 ){
-		return -1;
+		return errlog(nn,"error in matmul_16_scale_for_run() ");
 	}
 	// allocate the depth offset buffer
 	nn_scratch_reset(nn);
@@ -419,8 +451,13 @@ static int matmul_16_execute( struct nn_node * self, struct nn_graph * nn)
 		return errlog(nn,"scratch alloc failed");
 	}
 	runstate.offset_buffer = offs_buf;
-	if( make_offset_buf( nn, &runstate , bias_tensor) != 0 ) return -1;
+	if( make_offset_buf( nn, &runstate , bias_tensor) != 0 ) return errlog(nn,"error in make_offset_buf() ");
 	runstate.total_batches = runstate.out_shape.batches * runstate.out_shape.height * runstate.out_shape.width;
+	struct matmul_16_thread_runstate *thread_runstates;
+	thread_runstates = nn_scratch_alloc(nn, nn->num_vector_threads*sizeof(struct matmul_16_thread_runstate));
+	if (thread_runstates == NULL){
+		return errlog(nn, "scratch alloc failed");
+	}
 
 	// The operation is:
 	//    [b,h,w,din] * [ 1,1,din,dout]  -> [ 1,1,b*h*w,dout]
@@ -451,22 +488,45 @@ static int matmul_16_execute( struct nn_node * self, struct nn_graph * nn)
 	runstate.total_jobs = runstate.batch_chunks *  runstate.odepth_chunks;
 	runstate.out_ptr = (int16_t *) out_tensor->data;
 
-	int nthreads = min_i32(MATMUL_MAX_THREADS, runstate.total_jobs);
+	int nthreads = min_i32(nn->num_vector_threads, runstate.total_jobs);
 
 	runstate.batch_chunk_for_depth_prefech = max_i32(0, runstate.odepth_chunks - nthreads);
 
 	// prefetch the first set of weights
-	if( info->using_hvx)
+	//Now featuring vtcm!
+	//First determine if we can use vtcm
+	//Each thread will consume 64 (MATMUL_ODEPTH_CHUNK) * in_depth weights per iteration?
+	//Now we account for the number of threads
+	info->use_vtcm = 0;
+	//Compute vtcm partitioning size
+	uint32_t thread_vtcm_size = (nthreads < 2 )? nn->vtcm_size : ((nn->vtcm_size / nthreads)+(PAGE_SIZE-1U))&~(PAGE_SIZE-1U);
+	if(info->using_hvx && nn->vtcm_is_real && thread_vtcm_size >= (MATMUL_ODEPTH_CHUNK*(info->in_depth_padded)+127 & ~127)){
+		//Good canditate for vtcm usage
+		info->use_vtcm=1;
+		info->vtcm_ptr = nn->vtcm_ptr;
+	}
+	if(thread_vtcm_size * (uint32_t)nthreads > nn->vtcm_size){
+		logmsg(nn, 2, "OP_MatMul16 needs too much vtcm for threads! Wants: %u bytes per thread", thread_vtcm_size);
+		info->use_vtcm=0;
+	}
+	//Slightly hacky but we give the threads the size they should use and the pointer for vtcm
+	//Even if we do not expect them to use it
+	for(uint32_t i = 0; i < (uint32_t)nthreads; ++i){
+		thread_runstates[i].runstate = &runstate;
+		thread_runstates[i].thread_vtcm_size = thread_vtcm_size;
+		thread_runstates[i].thread_vtcm_ptr = (uint8_t *)nn->vtcm_ptr + i * thread_vtcm_size;
+		thread_runstates[i].thread_num = i;
+	}
+	if( info->using_hvx && !(info->use_vtcm))
 		l2fetch( info->b_repacked, 128, 128, (info->b_repacked_outer_stride * (MATMUL_ODEPTH_CHUNK/32)) / 128u );
 
 	runstate.current_job = 0;
 	nn_sem_init( & runstate.done_sem, 0);
-
 	void (*run_func)( struct nn_graph *, void *)  = 
 		info->using_hvx ? matmul_16_work_hvx: matmul_16_work_ref;
 	
 	for(int i = 0;  i < nthreads; i++){
-		nn_os_work_for_vector( nn, run_func, &runstate);
+		nn_os_work_for_vector( nn, run_func, &(thread_runstates[i]));
 	}
 	tensor_set_single_float( out_min_tensor, runstate.out_min );
 	tensor_set_single_float( out_max_tensor, runstate.out_max );
@@ -479,7 +539,8 @@ static int matmul_16_execute( struct nn_node * self, struct nn_graph * nn)
 static void
 matmul_16_work_ref( struct nn_graph * nn, void * rstpv)
 {
-	struct matmul_16_runstate * rstp = (struct matmul_16_runstate*)rstpv;
+	struct matmul_16_thread_runstate *my_runstate = (struct matmul_16_thread_runstate*)rstpv;
+	struct matmul_16_runstate * rstp = my_runstate->runstate;
 	struct matmul_16_info const * info = rstp->info;
 
 	int d_in = info->in_depth;
@@ -557,7 +618,9 @@ static void matmul_hvx_loop_2batch( struct matmul_16_runstate * rstp,
 static void
 matmul_16_work_hvx( struct nn_graph * nn, void * rstpv)
 {
-	struct matmul_16_runstate * rstp = (struct matmul_16_runstate*)rstpv;
+	struct matmul_16_thread_runstate *my_runstate = (struct matmul_16_thread_runstate*)rstpv;
+	struct matmul_16_runstate * rstp = my_runstate->runstate;
+	//struct matmul_16_runstate * rstp = (struct matmul_16_runstate*)rstpv;
 	struct matmul_16_info const * info = rstp->info;
 	int b_repacked_outer_stride = info->b_repacked_outer_stride;
 
@@ -578,12 +641,11 @@ matmul_16_work_hvx( struct nn_graph * nn, void * rstpv)
 #if  MATMUL_ODEPTH_CHUNK!=64
 #error "this needs rework"
 #endif
-
+	uint32_t vtcm_copy_size = (MATMUL_ODEPTH_CHUNK*(info->in_depth_padded)+127U & ~127U);
 	// "bsdecode" is used to decompose depth_idx = jobno/batch_chunks; batch_idx = jobno% batch_chunks
 	// without a divide
 	batchslice_decode bsdecode;
 	batchslice_decode_init( &bsdecode, batch_chunks);
-
 	while(   jobno = __sync_fetch_and_add( &rstp->current_job,1),  jobno < total_jobs){
 		int batch_idx = batchslice_decode_update( &bsdecode, jobno);	// faster count: batch chunk indx
 		int depth_idx = bsdecode.ibatch;								// slower: depth chunk index
@@ -591,17 +653,25 @@ matmul_16_work_hvx( struct nn_graph * nn, void * rstpv)
 		int dno = min_i32( d_per_job, d_out-dstart);	// # of dout to do in this run
 		int bstart = batch_idx * b_per_job;
 		int bno = min_i32( b_per_job, rstp->total_batches-bstart);	// # of batch to do in this run
+		//errlog(nn, "OP_QuantizedMatMul_8x8p32to16 bno: %d, bstart: %d, total_batches: %d", bno, bstart, rstp->total_batches);
 		//printf("batches %d..%d; depth %d..%d\n", bstart, bstart+ bno-1, dstart, dstart+dno-1);
 		if( dno != 64 ) continue;		// ??
 
 		int batchno = bstart;
 		uint8_t const * inptr = inptr0 + d_in * batchno;		// get 'a' pointer
 		uint8_t const * bptr = bptr0 + b_repacked_outer_stride*(dstart>>5);// get 'b' pointer
+		
+		//If using vtcm then fetch the weights
+		if(rstp->info->use_vtcm && !(vtcm_copy_size & 127U) && !((uint32_t)bptr & 127U)){
+			uint8_t *vtcm_offset = my_runstate->thread_vtcm_ptr;			
+			nn_graph_memcpy(nn, vtcm_offset, bptr, vtcm_copy_size);
+			bptr = (uint8_t const *)my_runstate->thread_vtcm_ptr;
+		}
 		//  prefetch the current activations
 		l2fetch( inptr, d_in, d_in, bno );
 
 		// prefetch the weights for next output depth??
-		if( batch_idx == rstp->batch_chunk_for_depth_prefech && dstart + dno < d_out ){
+		if(!(info->use_vtcm)&& batch_idx == rstp->batch_chunk_for_depth_prefech && dstart + dno < d_out){
 			l2fetch( bptr + b_depth_chunk_bytes, 128, 128, b_depth_chunk_bytes/ 128u );
 		}
 		
@@ -675,6 +745,7 @@ sub_asum_and_scale( HVX_Vector_x2 acc, int b_zero, int32_t a_sum, HVX_Vector fin
 // This function is what's in the main hvx loop, so we can can unroll it 4 x easily
 
 struct matmul_loopstate {
+	struct nn_graph *nn;
 	HVX_Vector_x2 acc0,acc1,acc2,acc3;		// output sums 64 xi32 in 4 batches
 	uint64_t sum01,sum23;		// pixel sums in 32-bit regs
 };
@@ -692,11 +763,15 @@ matmul_loop_core(
 	uint64_t a0_8vals = *(uint64_t const *)a_ptr;
 	// weights for 1st 4 inputs, across 64 outputs
 	HVX_Vector wts0_0 = *(HVX_Vector const *)b_slice;
+	//errlog(loopstatep->nn, "Weights 0 loaded from %p", b_slice);
 	HVX_Vector wts0_1 = *(HVX_Vector const *)(b_slice + b_repacked_outer_stride);
+	//errlog(loopstatep->nn, "Weights 1 loaded from %p", b_slice+b_repacked_outer_stride);
 	b_slice += 128;
 	// weights for 2nd 4 inputs, across 64 outputs
 	HVX_Vector wts1_0 = *(HVX_Vector const *)b_slice;
+	//errlog(loopstatep->nn, "Weights 2 loaded from %p", b_slice);
 	HVX_Vector wts1_1 = *(HVX_Vector const *)(b_slice + b_repacked_outer_stride);
+	//errlog(loopstatep->nn, "Weights 3 loaded from %p", b_slice+b_repacked_outer_stride);
 
 	loopstatep->acc0 =  accum_8x64( loopstatep->acc0, wts0_0, wts0_1, wts1_0, wts1_1, a0_8vals );
 	// next batch
@@ -751,7 +826,7 @@ matmul_hvx_loop_4batch(
 	Q6_dcfetch_A( a_ptr+3*in_depth );
 
 	struct matmul_loopstate loopstate;
-
+	loopstate.nn = rstp->info->nn;
 	loopstate.acc0.val[0] =  *(HVX_Vector const*)&depth_offsets[0];		// initialize the accums
 	loopstate.acc0.val[1] =	*(HVX_Vector const*)&depth_offsets[32];
 
@@ -854,10 +929,14 @@ matmul_hvx_loop_2batch(
 	for( int i =0 ; i < nloops; i++){
 		uint64_t a0_8vals = *(uint64_t const *)a_ptr;
 		HVX_Vector wts0_0 = *(HVX_Vector const *)b_slice;
+		//errlog(rstp->info->nn, "Weights 0 loaded from %p", b_slice);
 		HVX_Vector wts0_1 = *(HVX_Vector const *)(b_slice + b_repacked_outer_stride);
+		//errlog(rstp->info->nn, "Weights 1 loaded from %p", b_slice+b_repacked_outer_stride);
 		b_slice += 128;
 		HVX_Vector wts1_0 = *(HVX_Vector const *)b_slice;
+		//errlog(rstp->info->nn, "Weights 2 loaded from %p", b_slice);
 		HVX_Vector wts1_1 = *(HVX_Vector const *)(b_slice + b_repacked_outer_stride);
+		//errlog(rstp->info->nn, "Weights 3 loaded from %p", b_slice+b_repacked_outer_stride);
 		b_slice += 128;
 		acc0 =  accum_8x64( acc0, wts0_0, wts0_1, wts1_0, wts1_1, a0_8vals );
 		Q6_dcfetch_A( a_ptr+64 );
@@ -916,16 +995,18 @@ struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8p32to16 = {
 	.check = matmul_16_check,
 	.ctor = node_alloc_common,
 	.dtor = matmul_16_dtor,
-	.n_inputs = NN_IOCOUNT(11),
+	.n_inputs = NN_IOCOUNT_RANGE(11,12),
 	.n_outputs = NN_IOCOUNT(3),
+	.flags = NN_NODE_FLAG_CLS_MATMUL_16,
 };
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8p32to16_ref = {
 	.execute = matmul_16_execute,
 	.check = matmul_16_check,
 	.ctor = node_alloc_common,
 	.dtor = matmul_16_dtor,
-	.n_inputs = NN_IOCOUNT(11),
+	.n_inputs = NN_IOCOUNT_RANGE(11,12),
 	.n_outputs = NN_IOCOUNT(3),
+	.flags = NN_NODE_FLAG_CLS_MATMUL_16,
 };
 
 // This is like QuantizedMatMul_8x8p32to16, but it does
@@ -935,6 +1016,7 @@ struct nn_node_ops nn_ops_for_QuantizedMatMulDims_8x8p32to16 = {
 	.check = matmul_16_check,
 	.ctor = node_alloc_common,
 	.dtor = matmul_16_dtor,
-	.n_inputs = NN_IOCOUNT(11),
+	.n_inputs = NN_IOCOUNT_RANGE(11,12),
 	.n_outputs = NN_IOCOUNT(3),
+	.flags = NN_NODE_FLAG_CLS_MATMUL_16,
 };

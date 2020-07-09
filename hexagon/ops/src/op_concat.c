@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -212,6 +212,7 @@ static void concat_execute_slice_asm(struct nn_graph *nn, void *vinfo)
 static int concat_execute(struct nn_node *self, struct nn_graph *nn,
 		void (*concat_execute_slice_f)(struct nn_graph *self, void *vinfo))
 {
+	int have_output_range = (self->n_inputs - 1) % 3 == 2;
 	int n_input_tensors = (self->n_inputs-1)/3;
 	const struct tensor *dim_tensor = self->inputs[0];
 	const struct tensor **input_tensors = &self->inputs[1];
@@ -241,13 +242,23 @@ static int concat_execute(struct nn_node *self, struct nn_graph *nn,
 		if (input_tensors[i]->shape.batches != in_batches) {
 			return errlog(nn,"batches mismatch tensor %d",i);
 		}
-		out_min = fminf(out_min,tensor_get_float(min_tensors[i],0));
-		out_max = fmaxf(out_max,tensor_get_float(max_tensors[i],0));
 		total_depth += input_tensors[i]->shape.depth;
 	}
-	if (out_min > 0.0f) {
-		out_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
+	if (have_output_range) {
+		out_min = tensor_get_float(self->inputs[self->n_inputs - 2], 0);
+		out_max = tensor_get_float(self->inputs[self->n_inputs - 1], 0);
+		logmsg(nn, 2, "concat execute got an output range! min %f max %f", out_min, out_max);
+	} else {
+		for (i = 0; i < n_input_tensors; i++) {
+			out_min = fminf(out_min,tensor_get_float(min_tensors[i],0));
+			out_max = fmaxf(out_max,tensor_get_float(max_tensors[i],0));
+		}
+		if (out_min > 0.0f) {
+			out_min = 0.0f; // comport with op_quantize use of quantize_adjust_range setting minval = fminf(0.0f,min);
+		}
+		logmsg(nn, 2, "concat execute CALCULATED range! min %f max %f", out_min, out_max);
 	}
+
 	if( tensor_out_prepare_normal( out_tensor,in_batches,in_height,in_width,total_depth, NN_TYPE_QUINT8 )!=0){
 		return errlog(nn,"out too small");
 	}
@@ -292,8 +303,14 @@ static int concat_check(struct nn_node *self, struct nn_graph *nn)
 	// must be 3*n+1 inputs, where n >= 1
 
 	int n_in = (self->n_inputs - 1) /3;	// actual # of inputs
-	if (n_in < 1 || (self->n_inputs - 1) % 3 !=0 )
-		return errlog(nn,"concat: inputs must be 3*n+1, n>=1");
+	if (n_in < 1 || (self->n_inputs - 1) % 3 !=0 ) {
+		logmsg(nn, 2, "concat: maybe getting output range");
+		if ((self->n_inputs - 1) % 3 != 2) {
+			return errlog(nn,"concat: inputs must be 3*n+1, OR 3*n+3, n>=1");
+		} else {
+			logmsg(nn, 2, "concat: got an output range");
+		}
+	}
 
 
 	logmsg(nn,2,"concat node %p check OK",self);

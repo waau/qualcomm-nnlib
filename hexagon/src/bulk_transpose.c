@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -43,7 +43,7 @@ static int __attribute__((cold))
 find_workbuf_size(struct bulk_transpose_parms const * parms)
 {
 	int d = parms->in_dims[3];
-	if( d < 1 || d > 16 || ((d-1)&d)!=0 ) return -1;
+	if( d < 1 || d > 16 || ((d-1)&d)!=0 ) return errlog(NULL, "error in params d= %d  in find_workbuf_size()",d);
 	int hwmax = max_i32( parms->in_dims[1], parms->in_dims[2] );
 	if( hwmax <= 8) return 8*128;
 	int maxn = 128 >> __builtin_ctz(d);
@@ -89,7 +89,7 @@ perform_bulk_transpose_2(
 	if( work_area == NULL)
 		return find_workbuf_size( parms);
 	int d = parms->in_dims[3];
-	if( d < 1 || d > 16 || ((d-1)&d)!=0 ) return -1;
+	if( d < 1 || d > 16 || ((d-1)&d)!=0 ) return errlog(NULL, " error in params d= %d  in perform_bulk_transpose()",d);
 	int log2d = __builtin_ctz(d);
 	int tileN = 128u>>log2d;			// biggest tile for this d.
 	int log2_tilen = 7-log2d;

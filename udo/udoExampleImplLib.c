@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -35,7 +35,7 @@
 
 #include <string.h>
 #include <math.h>
-#include "SnpeUdo/UdoImplDspHexNNv2.h"
+#include "SnpeUdo/UdoImplDsp.h"
 #include "udoExampleImplLib.h"
 
 #define NUM_OPS 2
@@ -43,7 +43,7 @@
 
 // implementation library info
 SnpeUdo_HexNNv2GlobalInfra_t* infra = NULL;
-SnpeUdo_LibVersion_t ver = {{1, 0, 0}, {1, 3, 0}};  // lib version, api version
+SnpeUdo_LibVersion_t ver = {{1, 0, 0}, {API_VERSION_MAJOR, API_VERSION_MINOR, API_VERSION_TEENY}};  // lib version, api version
 SnpeUdo_HexNNInfraType_t iType= UDO_INFRA_HEXNN_V2;
 char udoPackageName[] = "udoExampleLib";
 char udoOpTypes[] = "opUdoPlusOne opUdoPlusStat";
@@ -134,7 +134,7 @@ SnpeUdo_ErrorType_t SnpeUdo_initImplLibrary (void* globalInfrastructure){
                 SnpeUdo_DspGlobalInfrastructure_t* hInfra = (SnpeUdo_DspGlobalInfrastructure_t*)globalInfrastructure;
                 SnpeUdo_Version_t hVer = hInfra->dspInfraVersion;
                 SnpeUdo_Version_t apiVer = ver.apiVersion;
-                if(hVer.major==apiVer.major && hVer.minor==apiVer.minor && hVer.teeny==apiVer.teeny && hInfra->infraType==iType){
+                if(hVer.major==apiVer.major && hInfra->infraType==iType){
                         infra = &(hInfra->hexNNv2Infra);
                         // possibly allocate memory and initialize some udo global variables, maybe based on global infrastructure
                         // mutex lock/unlock global variables here for thread safety

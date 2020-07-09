@@ -68,7 +68,7 @@ typedef void* remote_handle64;
 #endif
 
 #define UNUSED_PARAM(x) (void)(x)
-#define NN_VERSION 0x00021401
+#define NN_VERSION 0x00021A01
 
 #define V_68 0x68
 #define V_66 0x66
@@ -83,6 +83,7 @@ extern int Total_Threads;
 extern int Stack_Size;
 extern int VTCM_User_Req;
 extern SnpeUdo_DspGlobalInfrastructure_t* dspInfra;
+extern nn_mutex_t num_threads_mutex;
 
 // Lookup table from qurt's qurt_sysenv_arch_version&0xffff onto known thread-counts
 struct thread_count_t {
@@ -307,15 +308,15 @@ int check_udo_library_existence(uint32_t lib_id)
         while (cur_lib != NULL && cur_lib->index < lib_id) {
                 cur_lib = cur_lib->next;
         }
-        if (cur_lib == NULL)  return -1;
+        if (cur_lib == NULL)  return errlog(NULL, "check_udo_library_existence : cur_lib == null");
         if (cur_lib->index == lib_id)  return 0;
 
-        return -1;
+        return errlog(NULL, "check_udo_library_existence : failed ");
 }
 
 
 static int register_udo_lib(void* lib_handle, const SnpeUdo_ImpInfo_t* info, SnpeUdo_CreateOpFactoryFunction_t create_op_factory, SnpeUdo_CreateOperationFunction_t create_operation, SnpeUdo_ExecuteOpFunction_t execute_op, SnpeUdo_ReleaseOpFunction_t release_op, SnpeUdo_ReleaseOpFactoryFunction_t release_op_factory, SnpeUdo_TerminateImplLibraryFunction_t terminate_lib, SnpeUdo_ValidateOperationFunction_t validate_op, SnpeUdo_QueryOperationFunction_t query_op, impl_library* lib) {
-        if (lib == NULL)  return -1;
+        if (lib == NULL)  return errlog(NULL, "register_udo_lib : lib==null");
         lib->lib_handle = lib_handle;
         lib->package_name = info->packageName;
         lib->op_types = info->operationsString;
@@ -333,8 +334,7 @@ static int register_udo_lib(void* lib_handle, const SnpeUdo_ImpInfo_t* info, Snp
 }
 
 
-static int append_udo_impl_library(impl_library* lib, int* prev_loaded_lib) {
-
+static int append_udo_impl_library(impl_library* lib, int* prev_loaded_lib, uint32_t* udo_lib_registration_id) {
         // mutex lock
         nn_mutex_lock(&udo_library_mutex);
         int duplicated_lib = 0;
@@ -370,14 +370,15 @@ static int append_udo_impl_library(impl_library* lib, int* prev_loaded_lib) {
         *prev_loaded_lib = 0;
         if (duplicated_lib == 1){
                 if (cur && cur->lib_handle == lib->lib_handle)  *prev_loaded_lib = 1; 
-                return -1;
+                return errlog(NULL,"append_udo_impl_library : duplicated_lib == 1");
         }
-
-        return 0;
+        
+        *udo_lib_registration_id = lib->index;
+        return  0;
 }
 
 
-int hexagon_nn_udo_register_lib(const char* so_path_name, hexagon_nn_udo_err* err) {
+int hexagon_nn_register_udo_lib(const char* so_path_name, uint32_t* udo_lib_registration_id, hexagon_nn_udo_err* err) {
         void* handle = dlopen(so_path_name, RTLD_LAZY);
         if (!handle) {
                 errlog(NULL, "udo registration failed. shared object %s failed to open", so_path_name);
@@ -543,7 +544,7 @@ int hexagon_nn_udo_register_lib(const char* so_path_name, hexagon_nn_udo_err* er
         }
         SnpeUdo_Version_t udo_v = udo_lib_ver->apiVersion;
         SnpeUdo_Version_t hexnn_v = dspInfra->dspInfraVersion;
-        if (udo_v.major!=hexnn_v.major || udo_v.minor!=hexnn_v.minor ||udo_v.teeny!=hexnn_v.teeny) {
+        if (udo_v.major!=hexnn_v.major) {
                 nn_free(L);
                 terminate_lib();
                 dlclose(handle);
@@ -555,11 +556,15 @@ int hexagon_nn_udo_register_lib(const char* so_path_name, hexagon_nn_udo_err* er
                 }
                 return 0;
         }
+        
+        if (udo_v.minor!=hexnn_v.minor)
+                errlog(NULL, "Warning: udo package version minor mismatch");
 
         register_udo_lib(handle, impl_info, create_op_factory, create_operation, execute_operation, release_operation, release_op_factory, terminate_lib, validate_op, query_op, L);
-
+        
+        uint32_t lib_id = 0;
         int prev_loaded_lib = 0;
-        if (append_udo_impl_library(L, &prev_loaded_lib)!=0) {
+        if (append_udo_impl_library(L, &prev_loaded_lib, &lib_id)!=0) {
                 errlog(NULL, "udo registration failed. library %s has already been registered before.", impl_info->packageName);
                 nn_free(L);
                 if (prev_loaded_lib == 0)  terminate_lib();
@@ -569,17 +574,16 @@ int hexagon_nn_udo_register_lib(const char* so_path_name, hexagon_nn_udo_err* er
         }
 
         *err = UDO_SUCCESS;
+        *udo_lib_registration_id = lib_id;
         return 0;
 }
 
-int hexagon_nn_domains_udo_register_lib (remote_handle64 h, const char* so_path_name, hexagon_nn_udo_err* err) {
+int hexagon_nn_domains_register_udo_lib (remote_handle64 h, const char* so_path_name, uint32_t* udo_lib_registration_id, hexagon_nn_udo_err* err) {
         UNUSED_PARAM(h);
-        return hexagon_nn_udo_register_lib(so_path_name, err);
+        return hexagon_nn_register_udo_lib(so_path_name, udo_lib_registration_id, err);
 }
 
-
-int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo_err* err) {
-
+int hexagon_nn_free_udo_individual_lib (uint32_t udo_lib_registration_id, hexagon_nn_udo_err* err) {
         // mutex lock
         nn_mutex_lock(&udo_library_mutex);
         impl_library* current = reged_udo_libs;
@@ -593,8 +597,8 @@ int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo
                 mutex_to_unlock = 1;
         }
  
-        if (mutex_to_unlock == 0 && strcmp(reged_udo_libs->package_name, package_name) == 0) {
-                
+        if (mutex_to_unlock == 0 && udo_lib_registration_id==current->index) {
+        
                 next = reged_udo_libs->next;
 
                 if(reged_udo_libs->lib_handle!=NULL) {
@@ -611,7 +615,7 @@ int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo
 
         while (mutex_to_unlock == 0 && current->next!=NULL){
                 next = current->next;
-                if (strcmp(next->package_name, package_name) == 0) {
+                if (udo_lib_registration_id==next->index) {
                         if(next->lib_handle!=NULL) {
                                 if((next->terminate_lib)() != SNPE_UDO_NO_ERROR) {
                                         failed_to_terminate = 1;
@@ -631,10 +635,10 @@ int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo
         }
 
         if (not_found) {
-                errlog(NULL, "free udo individual library failed. udo library %s has not been registered", package_name);
+                errlog(NULL, "free udo individual library failed. udo library %d has not been registered", udo_lib_registration_id);
                 *err = UDO_LIB_NOT_REGISTERED;
         } else if (failed_to_terminate) {
-                errlog(NULL, "free udo individual library failed. udo library %s failed to terminate, and it has been forced to be un-registered", package_name);
+                errlog(NULL, "free udo individual library failed. udo library %d failed to terminate, and it has been forced to be un-registered", udo_lib_registration_id);
                 *err = UDO_LIB_FAILED_TO_TERMINATE;
         } else {
                 *err = UDO_SUCCESS;
@@ -651,9 +655,10 @@ int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo
         return 0;
 }
 
-int hexagon_nn_domains_free_udo_individual_lib (remote_handle64 h, const char* package_name, hexagon_nn_udo_err* err) {
+
+int hexagon_nn_domains_free_udo_individual_lib (remote_handle64 h, uint32_t udo_lib_registration_id, hexagon_nn_udo_err* err) {
         UNUSED_PARAM(h);
-        return hexagon_nn_free_udo_individual_lib(package_name, err);
+        return hexagon_nn_free_udo_individual_lib(udo_lib_registration_id, err);
 }
 
 
@@ -695,9 +700,12 @@ int hexagon_nn_domains_free_udo_libs (remote_handle64 h, hexagon_nn_udo_err* err
 
 int hexagon_nn_init_with_info(hexagon_nn_nn_id* g, const struct initinfo* info) {
 	if (!g) return AEE_EBADCLASS;
+        int res = 0;
+#if defined(USE_OS_QURT)
         qurt_arch_version_t av;
         qurt_sysenv_get_arch_version(&av);
-        int res = check_processor_version(av.arch_version);
+        res = check_processor_version(av.arch_version);
+#endif
         if (res!=0) return errlog(NULL,"Error:SKEL-ARCH MISMATCH. Init failed\n");
 
 
@@ -705,32 +713,48 @@ int hexagon_nn_init_with_info(hexagon_nn_nn_id* g, const struct initinfo* info) 
 	struct nn_graph *graph;
 	int ret;
 	if ((graph = nn_calloc(1,sizeof(*graph))) == NULL) {
-		return -1;
+               return  errlog(NULL,"hexagon_nn_init_with_info : (graph = nn_calloc(1,sizeof(*graph))) == NULL");
 	}
 	graph->graph_options = Default_graphoptions;
 
 	nn_os_vtcm_choose_size(graph);
 	graph->priority = info->priority;
+        graph->cpuEarlyWakeup = info->cpuEarlyWakeup;
 
 	graph->state = NN_GRAPH_CONSTRUCTION;
 	nn_mutex_init(&graph->log_mutex);
-	if ((graph->scratch = nn_memalign(128,SCRATCH_SIZE)) == NULL) {
-		nn_free(graph);
-		return -1;
-	}
+	nn_mutex_init(&graph->graph_specific_mutex);
+	int retry = 0;
+	do{
+		if ((graph->scratch = nn_memalign(128,SCRATCH_SIZE)) == NULL) {
+			retry++;
+		}
+		else {
+			retry = 0;
+		}
+		if(retry > 10) {
+			nn_free(graph);
+			return errlog(NULL,"Could not allocate scratch buffer after 10 tries.");
+		}
+	} while(retry);
 	graph->scratch_size = SCRATCH_SIZE;
 	if ((graph->logbuf = nn_calloc(1,LOGBUF_SIZE)) == NULL) {
 		nn_free(graph->scratch);
 		nn_free(graph);
-		return -1;
+		return errlog(NULL,"hexagon_nn_init_with_info : (graph->logbuf = nn_calloc(1,LOGBUF_SIZE)) == NULL");
 	}
 	graph->logbuf_size = LOGBUF_SIZE-1;
+
 	graph->logbuf_pos = 0;
+	nn_mutex_lock(&num_threads_mutex);
+	graph->num_vector_threads = Num_Vector_Threads;
+	graph->total_threads = Total_Threads;
+	nn_mutex_unlock(&num_threads_mutex);
 	if ((ret=nn_os_workers_spawn(graph)) != 0) {
 		nn_free(graph->logbuf);
 		nn_free(graph->scratch);
 		nn_free(graph);
-		return -1;
+                return errlog(NULL,"hexagon_nn_init_with_info :  ret=nn_os_workers_spawn(graph)) != 0");
 	}
 	/* allocate new ID */
 	*g = add_graph_to_hash(graph);
@@ -748,6 +772,7 @@ int hexagon_nn_init(hexagon_nn_nn_id *g)
 {
 	struct initinfo info;
 	info.priority = 0; // 0 is default
+        info.cpuEarlyWakeup = 0; // 0 is default
 	return hexagon_nn_init_with_info(g, &info);
 }
 
@@ -762,7 +787,7 @@ int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length)
 {
 	struct nn_graph *graph;
 	fast_strncpy((char *)buf,"id not found\n",length);
-	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
+	if ((graph = nn_id_to_graph(id)) == NULL) return errlog(NULL,"hexagon_nn_getlog :  nn_id_to_graph(%x) == NULL ",id);
 	buf[length-1] = '\0';
 	fast_strncpy((char *)buf,graph->logbuf,length-1);
 	graph->logbuf_pos = 0;
@@ -780,7 +805,7 @@ int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length)
 {
 	struct nn_graph *graph;
 	strncat((char *)buf,"id not found\n",length);
-	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
+	if ((graph = nn_id_to_graph(id)) == NULL) return errlog(NULL," hexagon_nn_snpprint : nn_id_to_graph(%x)) == NULL ",id);
 	do_snpprint(graph,(char *)buf,length);
 	return 0;
 }
@@ -794,7 +819,7 @@ int hexagon_nn_domains_snpprint(remote_handle64 h, nn_id_t id, unsigned char *bu
 int hexagon_nn_set_debug_level(nn_id_t id, int level)
 {
 	struct nn_graph *graph;
-	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
+	if ((graph = nn_id_to_graph(id)) == NULL) return errlog(NULL,"hexagon_nn_set_debug_level : nn_id_to_graph(%x) == NULL",id);
 	if (level < 0) level = 0;
 	graph->debug_level = level;
 	return 0;
@@ -808,7 +833,7 @@ int hexagon_nn_domains_set_debug_level(remote_handle64 h, nn_id_t id, int level)
 int hexagon_nn_set_graph_option(nn_id_t id, char const * optname, int value)
 {
 	struct nn_graph *graph;
-	if ((graph = nn_id_to_graph(id)) == NULL) return -1;
+	if ((graph = nn_id_to_graph(id)) == NULL) return errlog(NULL," hexagon_nn_set_graph_option :  nn_id_to_graph(%x) == NULL",id);
 	return nn_option_set_int( graph, optname, value);
 }
 
@@ -817,10 +842,97 @@ int hexagon_nn_domains_set_graph_option(remote_handle64 h, nn_id_t id, char cons
 	return hexagon_nn_set_graph_option(id, optname, value);
 }
 
+int hexagon_nn_serialize_size(nn_id_t id, uint32_t * serialized_obj_size_out, uint32_t * return_code) {
+    // API Will always return 0. return codes are set in return_code param. return codes can be found in serialize_graph.h
+    struct nn_graph *graph;
+    
+    if ((graph = nn_id_to_graph(id)) == NULL) {
+        errlog(NULL,"nn id %x not found",id);
+        *return_code = NN_SERIALIZATION_GRAPH_NOT_FOUND;
+        return 0;
+    }
+
+    if (graph->state != NN_GRAPH_PREPARED) {
+        errlog(graph,"Graph not prepared. Only prepared graphs can be serialized");
+        *return_code = NN_SERIALIZATION_GRAPH_NOT_PREPARED;
+        return 0;
+    }
+
+    *return_code = serialize_size(graph, serialized_obj_size_out);
+    return 0;
+}
+
+int hexagon_nn_domains_serialize_size(remote_handle64 h, nn_id_t id, uint32_t * serialized_obj_size_out, uint32_t * return_code) {
+    UNUSED_PARAM(h);
+    return hexagon_nn_serialize_size(id, serialized_obj_size_out, return_code);
+}
+
+
+int hexagon_nn_serialize(nn_id_t id, uint8_t * buffer, int32_t buffer_size, uint32_t * return_code) {
+    // API Will always return 0. return codes are set in return_code param. return codes can be found in serialize_graph.h
+    struct nn_graph *graph;
+    
+    if ((graph = nn_id_to_graph(id)) == NULL) {
+        errlog(NULL,"nn id %x not found",id);
+        *return_code = NN_SERIALIZATION_GRAPH_NOT_FOUND;
+        return 0;
+    }
+
+    if (graph->state != NN_GRAPH_PREPARED) {
+        errlog(graph,"Graph not prepared. Only prepared graphs can be serialized");
+        *return_code = NN_SERIALIZATION_GRAPH_NOT_PREPARED;
+        return 0;
+    }
+
+    *return_code = serialize(graph, buffer, buffer_size);
+    return 0;
+}
+
+int hexagon_nn_domains_serialize(remote_handle64 h, nn_id_t id, uint8_t * buffer, int32_t buffer_size, uint32_t * return_code) {
+    UNUSED_PARAM(h);
+    return hexagon_nn_serialize(id, buffer, buffer_size, return_code);
+}
+
+
+int hexagon_nn_deserialize(const uint8_t * buffer, int32_t buffer_size, nn_id_t * new_graph_out, uint32_t * return_code) {
+    // API Will always return 0. return codes are set in return_code param. return codes can be found in serialize_graph.h
+    struct nn_graph *graph;
+    hexagon_nn_nn_id graph_id;
+    int deserialize_flag = 1;
+    int res;
+    // call hexagon_nn_init
+    struct initinfo info;
+    info.priority = 0;
+
+    if (hexagon_nn_init_with_info(&graph_id, &info) != 0 || (graph = nn_id_to_graph(graph_id)) == NULL){
+        errlog(NULL, "Failed to initialize new graph");
+        *return_code = NN_SERIALIZATION_ERROR;
+        return 0;
+    }
+
+    if((res = deserialize(graph, buffer_size, buffer)) != 0) {
+        nn_id_to_graph_and_remove(graph_id);
+        do_teardown(graph);
+        *return_code = res;
+        errlog(graph, "Failed to Deserialze graph");
+        return 0;
+    }
+
+    *return_code = do_prepare(graph, deserialize_flag);
+    *new_graph_out = (nn_id_t) graph_id;
+    
+    return 0;
+}
+
+int hexagon_nn_domains_deserialize(remote_handle64 h, const uint8_t * buffer, int32_t buffer_size, nn_id_t * new_graph_out, uint32_t * return_code) {
+    UNUSED_PARAM(h);
+    return hexagon_nn_deserialize(buffer, buffer_size, new_graph_out, return_code);
+}
+
 int hexagon_nn_prepare(nn_id_t id)
 {
 	struct nn_graph *graph;
-
+int deserialize_flag = 0;
 	uint64_t pcycle_start;
 	uint64_t pcycle_stop;
 
@@ -829,7 +941,7 @@ int hexagon_nn_prepare(nn_id_t id)
 	}
 	pcycle_start = nn_os_get_cycles(graph);
 
-	int retval = do_prepare(graph);
+	int retval = do_prepare(graph, deserialize_flag);
 
 	pcycle_stop = nn_os_get_cycles(graph);
 	graph->execution_total_cycles = pcycle_stop - pcycle_start;
@@ -1087,7 +1199,8 @@ static int execute_inner(
         uint32_t n_inputs,
         hexagon_nn_tensordef *outputs,
         uint32_t n_outputs,
-        execute_basic_info* exe_info)
+        execute_basic_info* exe_info,
+        uint64_t deadline_us)
 {
         struct nn_graph *graph;
         uint64_t pcycle_start;
@@ -1097,6 +1210,16 @@ static int execute_inner(
                 return errlog(NULL,"nn id %x not found",id);
         }
         pcycle_start = nn_os_get_cycles(graph);
+
+        if(deadline_us != 0) {
+                uint64_t cur_us = nn_os_get_usecs(graph);
+                if(cur_us > deadline_us){
+                        exe_info->result = NN_EXECUTE_MISSED_DEADLINE;
+                        return errlog(graph,"Timeout: cur_us:%llu > deadline_us:%llu",cur_us,deadline_us);
+                }
+        }
+        graph->deadline_us = deadline_us;
+
         if (graph->n_inputs != n_inputs) {
                 struct tensor *inputs_tmp;
                 if ((inputs_tmp = nn_realloc((void *)graph->inputs,sizeof(*inputs_tmp)*n_inputs)) == NULL) {
@@ -1175,6 +1298,28 @@ static int execute_inner(
         return ret;
 }
 
+int set_execute_extra_info(int rst, execute_basic_info *exe_inner_info, hexagon_nn_execute_info *execute_info){
+        execute_info->extraInfoValidLen = sizeof(hexagon_nn_execute_complete_info);
+        hexagon_nn_execute_complete_info* c_info = (hexagon_nn_execute_complete_info*)execute_info->extraInfo;
+        if (exe_inner_info->result == NN_EXECUTE_ERROR) {
+                (c_info->exe_err_info).exe_failure_node_id = exe_inner_info->exe_failure_node_id;
+                (c_info->exe_err_info).exe_failure_node_op_type = exe_inner_info->exe_failure_node_op_type;
+        } else if (exe_inner_info->result == NN_EXECUTE_BUFFER_SIZE_ERROR) {
+                (c_info->buffer_size_err_info).exe_failure_node_id = exe_inner_info->exe_failure_node_id;
+                (c_info->buffer_size_err_info).exe_failure_node_op_type = exe_inner_info->exe_failure_node_op_type;
+        } else {
+                (c_info->udo_err_info).exe_failure_node_id = exe_inner_info->exe_failure_node_id;
+                if (rst == UDO_EXE_LIB_NOT_REGISTERED_INTERNAL) {
+                        (c_info->udo_err_info).exe_failure_udo_err_type = UDO_EXE_LIB_NOT_REGISTERED;
+                } else if (rst == UDO_EXE_INVALID_INPUTS_OUTPUTS_QUANTIZATION_TYPE_INTERNAL) {
+                        (c_info->udo_err_info).exe_failure_udo_err_type = UDO_EXE_INVALID_INPUTS_OUTPUTS_QUANTIZATION_TYPE;
+                } else {
+                        (c_info->udo_err_info).exe_failure_udo_err_type = UDO_EXE_OP_EXECUTE_FAILED;
+                        (c_info->udo_err_info).exe_failure_snpe_udo_err_code = rst;
+                }
+        }
+        return 0;
+}
 
 int hexagon_nn_execute_new(
 	nn_id_t id,
@@ -1184,7 +1329,52 @@ int hexagon_nn_execute_new(
 	uint32_t n_outputs)
 {
         execute_basic_info exe_info;
-        return execute_inner(id, inputs, n_inputs, outputs, n_outputs, &exe_info);
+        return execute_inner(id, inputs, n_inputs, outputs, n_outputs, &exe_info, 0);
+}
+
+int hexagon_nn_execute_with_option(
+        nn_id_t id,
+        const hexagon_nn_tensordef *inputs,
+        uint32_t n_inputs,
+        hexagon_nn_tensordef *outputs,
+        uint32_t n_outputs,
+        hexagon_nn_execute_info *execute_info,
+        const hexagon_nn_execute_option *options,
+        uint32_t n_options){
+
+        uint64_t deadline_us = 0;
+
+        if(n_options > 0){
+                for(int i = 0; i < n_options; i++){
+                        switch(options[i].option_id){
+                        case DEADLINE_OPTION:{
+                                hexagon_nn_deadline_info *deadline_info = (hexagon_nn_deadline_info*)options[i].option_ptr;
+                                if(deadline_info->deadline > 0){
+                                        deadline_us = (((uint64_t)deadline_info->deadline_hi) << 32 | deadline_info->deadline_lo);
+                                }
+                                break;
+                        }
+                        // more options can be added here
+                        default:
+                            // invalid operation type
+                            return errlog(NULL,"invalid option: %d", options[i].option_id);
+                        }
+                }
+        }
+        if(execute_info->extraInfo && execute_info->extraInfoLen > 0){
+                memset(execute_info->extraInfo, 0, execute_info->extraInfoLen);
+        }
+
+        execute_basic_info exe_inner_info;
+        int r = execute_inner(id, inputs, n_inputs, outputs, n_outputs, &exe_inner_info, deadline_us);
+        execute_info->result = exe_inner_info.result;
+
+        if (execute_info->extraInfo==NULL || execute_info->extraInfoLen < sizeof(hexagon_nn_execute_complete_info) || (exe_inner_info.result != NN_EXECUTE_ERROR && exe_inner_info.result != NN_EXECUTE_BUFFER_SIZE_ERROR && exe_inner_info.result != NN_EXECUTE_UDO_ERROR)) {
+                execute_info->extraInfoValidLen = 0;
+        } else {
+                set_execute_extra_info(r, &exe_inner_info, execute_info);
+        }
+        return 0;
 }
 
 
@@ -1205,32 +1395,14 @@ int hexagon_nn_execute_with_info(
         }
 
         execute_basic_info exe_inner_info;
-        int r = execute_inner(id, inputs, n_inputs, outputs, n_outputs, &exe_inner_info);
+        int r = execute_inner(id, inputs, n_inputs, outputs, n_outputs, &exe_inner_info, 0);
         execute_info->result = exe_inner_info.result;
+ 
         if (execute_info->extraInfo==NULL || execute_info->extraInfoLen < sizeof(hexagon_nn_execute_complete_info) || (exe_inner_info.result != NN_EXECUTE_ERROR && exe_inner_info.result != NN_EXECUTE_BUFFER_SIZE_ERROR && exe_inner_info.result != NN_EXECUTE_UDO_ERROR)) {
                 execute_info->extraInfoValidLen = 0;
         } else {
-                execute_info->extraInfoValidLen = sizeof(hexagon_nn_execute_complete_info);
-                hexagon_nn_execute_complete_info* c_info = (hexagon_nn_execute_complete_info*)execute_info->extraInfo;
-                if (exe_inner_info.result == NN_EXECUTE_ERROR) {
-                        (c_info->exe_err_info).exe_failure_node_id = exe_inner_info.exe_failure_node_id;
-                        (c_info->exe_err_info).exe_failure_node_op_type = exe_inner_info.exe_failure_node_op_type;
-                } else if (exe_inner_info.result == NN_EXECUTE_BUFFER_SIZE_ERROR) {
-                        (c_info->buffer_size_err_info).exe_failure_node_id = exe_inner_info.exe_failure_node_id;
-                        (c_info->buffer_size_err_info).exe_failure_node_op_type = exe_inner_info.exe_failure_node_op_type;
-                } else {
-                        (c_info->udo_err_info).exe_failure_node_id = exe_inner_info.exe_failure_node_id;
-                        if (r == UDO_EXE_LIB_NOT_REGISTERED_INTERNAL) { 
-                                (c_info->udo_err_info).exe_failure_udo_err_type = UDO_EXE_LIB_NOT_REGISTERED;
-                        } else if (r == UDO_EXE_INVALID_INPUTS_OUTPUTS_QUANTIZATION_TYPE_INTERNAL) { 
-                                (c_info->udo_err_info).exe_failure_udo_err_type = UDO_EXE_INVALID_INPUTS_OUTPUTS_QUANTIZATION_TYPE;
-                        } else {
-                                (c_info->udo_err_info).exe_failure_udo_err_type = UDO_EXE_OP_EXECUTE_FAILED;
-                                (c_info->udo_err_info).exe_failure_snpe_udo_err_code = r;
-                        }
-                }
+                set_execute_extra_info(r, &exe_inner_info, execute_info);
         }
- 
         return 0;
 }
 
@@ -1256,6 +1428,20 @@ int hexagon_nn_domains_execute_with_info(
         hexagon_nn_execute_info *execute_info) {
         UNUSED_PARAM(h);
         return hexagon_nn_execute_with_info(id, inputs, n_inputs, outputs, n_outputs, execute_info);
+}
+
+int hexagon_nn_domains_execute_with_option(
+        remote_handle64 h,
+        nn_id_t id,
+        const hexagon_nn_tensordef *inputs,
+        uint32_t n_inputs,
+        hexagon_nn_tensordef *outputs,
+        uint32_t n_outputs,
+        hexagon_nn_execute_info *execute_info,
+        const hexagon_nn_execute_option *options,
+        uint32_t n_options) {
+        UNUSED_PARAM(h);
+        return hexagon_nn_execute_with_option(id, inputs, n_inputs, outputs, n_outputs, execute_info, options, n_options);
 }
 
 int hexagon_nn_execute(
@@ -1372,7 +1558,7 @@ int hexagon_nn_get_perfinfo(nn_id_t id,
 		return errlog(NULL,"nn id %x not found",id);
 	}
 	if ((*n_items_out=do_perfinfo_get(graph,info_out,info_out_len))==~0U) {
-		return -1;
+		return errlog(NULL,"No info is present.");
 	} else {
 		return 0;
 	}
@@ -1594,16 +1780,16 @@ int hexagon_nn_domains_GetHexagonBinaryVersion(remote_handle64 h, int *ver)
 	return hexagon_nn_GetHexagonBinaryVersion(ver);
 }
 
-int hexagon_nn_PrintLog(const uint8_t data_in, unsigned int data_in_len)
+int hexagon_nn_PrintLog(const unsigned char* buf, int bufLen)
 {
 	return 0;
 }
 
 int hexagon_nn_domains_PrintLog(remote_handle64 h,
-	const uint8_t data_in, unsigned int data_in_len)
+	const unsigned char* buf, int bufLen)
 {
 	UNUSED_PARAM(h);
-	return hexagon_nn_PrintLog(data_in, data_in_len);
+	return hexagon_nn_PrintLog(buf, bufLen);
 }
 
 int hexagon_nn_op_name_to_id(const char *name, unsigned int *id)
@@ -1623,7 +1809,7 @@ int hexagon_nn_domains_op_name_to_id(remote_handle64 h,
 int hexagon_nn_op_id_to_name(const unsigned int id, char *name, int name_len)
 {
 	const char *opname = op_type_to_string(id);
-	if ( opname == NULL ||  (strlen(opname)+1) > name_len) return -1;
+	if ( opname == NULL ||  (strlen(opname)+1) > name_len) return errlog(NULL, "hexagon_nn_op_id_to_name : opname == NULL ||  (strlen(opname)+1) > name_len");
 	strcpy(name,opname);
 	return 0;
 }
@@ -1694,6 +1880,7 @@ static int hexagon_nn_vote(unsigned int level)
 
     // Bounds created by an expected level from 0-255 split into 5 powersave modes
     const unsigned int RELEASE_VOTE = 0x7FFFFFFF;
+    const unsigned int TURBO_PLUS_UPPER_BOUNDS = 25;
     const unsigned int TURBO_UPPER_BOUNDS = 51;
     const unsigned int NOMINAL_PLUS_UPPER_BOUNDS = 102;
     const unsigned int NOMINAL_UPPER_BOUNDS = 153;
@@ -1712,7 +1899,19 @@ static int hexagon_nn_vote(unsigned int level)
         request.dcvs_v2.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
         request.dcvs_v2.set_latency = TRUE;
         request.dcvs_v2.set_dcvs_params = TRUE;
-        if (level < TURBO_UPPER_BOUNDS){
+        if (level < TURBO_PLUS_UPPER_BOUNDS) {
+            request.dcvs_v2.latency = LOW_LATENCY;
+#if (__HEXAGON_ARCH__ >= 66)
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO_PLUS;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_TURBO_PLUS;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_TURBO_PLUS;
+#else
+            logmsg(NULL,0, "hexagon_nn_vote TURBO_PLUS requested, but not on V66.  Voting for TURBO.");
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO;
+            request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_TURBO;
+            request.dcvs_v2.dcvs_params.target_corner = HAP_DCVS_VCORNER_TURBO;
+#endif
+        } else if (level < TURBO_UPPER_BOUNDS){
             request.dcvs_v2.latency = LOW_LATENCY;
             request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO;
             request.dcvs_v2.dcvs_params.min_corner = HAP_DCVS_VCORNER_TURBO;
@@ -1767,12 +1966,15 @@ int hexagon_nn_set_powersave_details(hexagon_nn_corner_type corner, hexagon_nn_d
         request.dcvs_v2.dcvs_option = HAP_DCVS_V2_PERFORMANCE_MODE;
         request.dcvs_v2.set_latency = TRUE;
         request.dcvs_v2.set_dcvs_params = TRUE;
-#if (__HEXAGON_ARCH__ >= 66)
         if (corner == NN_CORNER_TURBOPLUS){
-            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO_PLUS;
             request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
+#if (__HEXAGON_ARCH__ >= 66)
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO_PLUS;
+#else // (__HEXAGON_ARCH__ >= 66)
+            logmsg(NULL,0, "hexagon_nn_vote TURBO_PLUS requested, but not on V66.  Voting for TURBO.");
+            request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO;
+#endif
         } else
-#endif // (__HEXAGON_ARCH__ >= 66)
 	if (corner == NN_CORNER_TURBO){
             request.dcvs_v2.dcvs_params.max_corner = HAP_DCVS_VCORNER_TURBO;
             request.dcvs_v2.latency = (latency == 0 ? LOW_LATENCY : latency);
@@ -1829,6 +2031,9 @@ static int hexagon_nn_vote(unsigned int level)
         request.mips_bw.latency = -1;
     }
     else {
+        // Note: other voting APIs have been updated to handle TURBO_PLUS
+        // We are consciously not updating this one as it's for V60 only, and
+        // we are limiting our changes in the V60 code these days
         if (level < TURBO_UPPER_BOUNDS){
             request.mips_bw.mipsPerThread = 500;
             request.mips_bw.mipsTotal = 1000;
@@ -1947,7 +2152,7 @@ int hexagon_nn_graph_config(
 			graph->enable_graph_print = 1;
 			string_length = strlen(string_options[i].string_data);
 			if ((graph->enable_graph_print_prefix = nn_calloc(1,string_length+1)) == NULL) {
-				return -1;
+				return errlog(graph,"hexagon_nn_graph_config : (graph->enable_graph_print_prefix = nn_calloc(1,string_length+1)) == NULL");
 			}
 			strcpy(graph->enable_graph_print_prefix, string_options[i].string_data);
 			break;
@@ -1955,7 +2160,7 @@ int hexagon_nn_graph_config(
 			graph->enable_const_print = 1;
 			string_length = strlen(string_options[i].string_data);
 			if ((graph->enable_const_print_prefix = nn_calloc(1,string_length+1)) == NULL) {
-				return -1;
+				return errlog(graph,"hexagon_nn_graph_config : (graph->enable_graph_print_prefix = nn_calloc(1,string_length+1)) == NULL ");
 			}
 			strcpy(graph->enable_const_print_prefix, string_options[i].string_data);
 			break;
@@ -1966,14 +2171,14 @@ int hexagon_nn_graph_config(
 			graph->enable_tensor_print = 1;
 			string_length = strlen(string_options[i].string_data);
 			if ((graph->enable_tensor_print_prefix = nn_calloc(1,string_length+1)) == NULL) {
-				return -1;
+				return errlog(graph,"hexagon_nn_graph_config : (graph->enable_tensor_print_prefix = nn_calloc(1,string_length+1)) == NULL");
 			}
 			strcpy(graph->enable_tensor_print_prefix, string_options[i].string_data);
 			break;
 		case NN_OPTION_TENSOR_PRINT_FILTER:
 			string_length = strlen(string_options[i].string_data);
 			if ((graph->tensor_print_filter = nn_calloc(1,string_length+1)) == NULL) {
-				return -1;
+				return errlog(graph, "hexagon_nn_graph_config : (graph->tensor_print_filter = nn_calloc(1,string_length+1)) == NULL ");
 			}
 			strcpy(graph->tensor_print_filter, string_options[i].string_data);
 			break;
@@ -2006,7 +2211,7 @@ int hexagon_nn_config_with_options(
 	int vector_mode_mask = qurt_hvx_get_units();
 	qurt_sysenv_max_hthreads_t num_threads;
 	qurt_sysenv_get_max_hw_threads(&num_threads);
-
+	nn_mutex_lock(&num_threads_mutex);
 	Total_Threads = num_threads.max_hthreads;
 	Num_Vector_Threads = (vector_mode_mask & 0xF00) >> 8;
 	Stack_Size = 16384;
@@ -2019,6 +2224,7 @@ int hexagon_nn_config_with_options(
 
         int res = check_processor_version(arch);
         if (res != 0){
+                nn_mutex_unlock(&num_threads_mutex);
                 return errlog(NULL,"Error:SKEL-ARCH MISMATCH. Config failed\n");
         };
 
@@ -2055,12 +2261,13 @@ int hexagon_nn_config_with_options(
 			    break;
 			default:
 				// UNSUPPORTED option.  Too bad we can't logmsg (TODO, FIXME)
+				nn_mutex_unlock(&num_threads_mutex);
 				return 1;
 				break;
 			}
 		}
 	}
-
+	nn_mutex_unlock(&num_threads_mutex);
 	return 0;
 }
 

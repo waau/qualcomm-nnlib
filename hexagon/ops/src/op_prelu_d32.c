@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -347,7 +347,7 @@ static int prelu_opt_execute(struct nn_node *self, struct nn_graph *nn)
 
 	struct tdata td;
 	if(set_scaling(nn,&td.scaling, nodeinfo, in_min,in_max, out_min, out_max )){
-		return -1;
+		return errlog(nn,"error in set_scaling()");
 	}
 	logmsg(nn,2,"d: %d<%d>%d ==> %d\n",d_pad_before,d,d_pad_after,d_total);
 	if (tensor_out_prepare_padded_d32(

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -1188,7 +1188,7 @@ setup_packzilla_info( struct conv_from_d32_info *info)
 	int wpad = info->in_format.width_pad[0] & 3;		// width padding
 	int nd_middle = 4*d;
 	int nvec = (wpad +wid + 3)>>2;					// total # of vectors to process
-	if( d <1  || d >32 || nvec < 1) return -1;		// should never happen
+	if( d <1  || d >32 || nvec < 1) return errlog(NULL,"  info->opshape.depth is out of range or total number of vector to process is less than 1 ");		// should never happen
 
 	int nd_left = 0;
 	int nd_right;

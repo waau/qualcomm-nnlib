@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -168,7 +168,7 @@ static int input_execute(struct nn_node *self, struct nn_graph *nn)
 	nn_mcmanager_wait( nn, &mcman );
 
 	if( errors )
-		return -1;
+		return errlog(nn,"error in input_check()");
 	return 0;
 }
 
@@ -312,7 +312,7 @@ static int input_execute_multibatch(struct nn_node *self, struct nn_graph *nn)
 		if( i < n_dimsel) dimsel = dimsels[i];
 		unsigned copysize=0;
 		uint8_t const * src;
-		if( dimsels < 0 ){	// direct copy
+		if( dimsel < 0 ){	// direct copy
 			copysize = in->max_size;
 			src = (uint8_t const*)in->data;
 		}else if( dimsel <=3){	// (already checked; guarding stores)
@@ -336,7 +336,7 @@ static int input_execute_multibatch(struct nn_node *self, struct nn_graph *nn)
 	}
 	nn_mcmanager_wait( nn, &mcman );
 
-	if( errors) return -1;
+	if( errors) return errlog(nn," error happened in input_execute_multibatch ()");
 	return 0;
 }
 
@@ -351,7 +351,7 @@ static int input_check(struct nn_node *self, struct nn_graph *nn)
 	}
 	struct input_info *info;
 	if (self->opaque == NULL) {
-		if ((info = nn_calloc(1,sizeof(*info))) == NULL) return -1;
+		if ((info = nn_calloc(1,sizeof(*info))) == NULL) return errlog(nn," error in memory allocation in input_check()");
 	} else {
 		info = self->opaque;
 	}

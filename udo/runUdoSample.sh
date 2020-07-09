@@ -10,12 +10,12 @@ adb push android_Release_aarch64/udo_sample_exe $BINDIR/
 
 DSPDIR=$DEVDIR/dsp
 adb shell mkdir -p $DSPDIR
-adb push hexagon_Release_dynamic_toolv82_v65/ship/libhexagon_nn_skel.so $DSPDIR/
-# adb push hexagon_Release_dynamic_toolv82_v66/ship/libhexagon_nn_skel.so $DSPDIR/
+adb push hexagon_Release_dynamic_toolv83_v65/ship/libhexagon_nn_skel.so $DSPDIR/
+# adb push hexagon_Release_dynamic_toolv83_v66/ship/libhexagon_nn_skel.so $DSPDIR/
 
 UDODIR=$DSPDIR/udoLibs
 adb shell mkdir -p $UDODIR
-adb push udo/hexagon_Release_dynamic_toolv82_v65/udoExampleImplLib.so $UDODIR/
+adb push udo/hexagon_Release_dynamic_toolv83_v65/udoExampleImplLib.so $UDODIR/
 
 
 echo "---------------------------------------------"

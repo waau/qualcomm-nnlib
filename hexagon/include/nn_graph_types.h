@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -61,9 +61,7 @@ typedef enum padding_type_enum {
 
 typedef enum corner_type_enum {
    NN_CORNER_RELEASE = 0,
-#if (__HEXAGON_ARCH__ >= 66)
    NN_CORNER_TURBOPLUS,
-#endif
    NN_CORNER_TURBO,
    NN_CORNER_NOMPLUS,
    NN_CORNER_NOMINAL,
@@ -139,7 +137,16 @@ enum {
         NN_EXECUTE_PRIORITY_UPDATE_ERROR,
         NN_EXECUTE_PRIORITY_RESTORE_ERROR,
         NN_EXECUTE_VTCM_ACQUIRE_ERROR,
-        NN_EXECUTE_LOOP_UPDATE_ERROR
+        NN_EXECUTE_LOOP_UPDATE_ERROR,
+        NN_EXECUTE_OUT_OF_SCRATCH_ERROR,
+        NN_EXECUTE_MISSED_DEADLINE
+};
+
+enum {
+        NN_PREPARE_SUCCESS = 0,
+        NN_PREPARE_ERROR,
+        NN_PREPARE_NEW_CONST_ERROR,
+        NN_PREPARE_OUT_OF_SCRATCH_ERROR
 };
 
 enum {
@@ -1175,4 +1182,9 @@ static inline int shape_apparent_rank ( struct shape const *shp){
 		(shp->width > 1)? 2:
 		(shp->depth>1)? 1: 0;
 }
+
+enum hexagon_nn_execute_option_type{
+	DEADLINE_OPTION
+};
+
 #endif

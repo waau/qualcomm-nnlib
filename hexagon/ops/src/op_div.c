@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,6 +41,16 @@
 #if defined(__hexagon__)
 #include "hexagon_types.h"
 #endif
+
+#define DIV_EPISILON 1e-6f
+#define ALIGN_SIZE 4
+
+#ifdef HEXAGON_V66
+#define CONVERT_MAX_THREADS 4
+#else
+#define CONVERT_MAX_THREADS 2
+#endif
+
 /*
  * 
  * Now that that's out of the way, let's get to the good stuff.
@@ -61,6 +71,19 @@ struct flipdata {
     uint8_t *out_data;
     nn_sem_t donesem;
     int num_elements;
+};
+
+struct convert_state {
+    int32_t n_batchinputs;	// actual number of batches
+    float out_min;	// output range
+    float out_level_recip;
+    volatile int32_t input_next; // input to process next batch.
+    uint32_t out_stride;
+    const uint8_t *input_data;
+    uint8_t *output_data;
+    float *min_array;
+    float *max_array;
+    nn_sem_t done_sem;
 };
 
 static void map_values(struct nn_graph *nn, void *vtd)
@@ -111,10 +134,11 @@ static void flip_values(struct nn_graph *nn, void *vtd)
     const int num_loops = 1 + ((td->num_elements - 1) / 128); //ceiling
 
     for (int i=0; i<num_loops; i++) {
-        HVX_Vector vin = *(HVX_Vector *) in_data;
-        HVX_Vector *vout = (HVX_Vector *) out_data;
-        
-        *vout = Q6_Vub_vsub_VubVub_sat(max_value, vin);
+        HVX_Vector vin = q6op_V_vldu_A( (HVX_Vector *)in_data );
+        HVX_Vector *voutp = (HVX_Vector*) out_data;
+
+        HVX_Vector vout = Q6_Vub_vsub_VubVub_sat(max_value, vin);
+        q6op_vstu_AV(voutp,vout);
 
         in_data += 128;
         out_data += 128;
@@ -148,7 +172,13 @@ static int div_depthwise_execute(struct nn_node *self, struct nn_graph *nn)
     float *out_max = out_max_tensor->data;
 
     int elements = a_tensor->shape.batches * a_tensor->shape.height * a_tensor->shape.width * a_tensor->shape.depth;
-    int depth = b_tensor->shape.depth;
+    // the height and width of denominator tensor b should equal to 1
+    int denominator_size = b_tensor->shape.batches * b_tensor->shape.depth;
+    if(b_tensor->shape.batches != 1){
+        if(a_tensor->shape.height != 1 || a_tensor->shape.width != 1){
+            return errlog(nn,"only support elementwise div when both batch and depth not equal to 1");
+        }
+    }
 
     if(self->n_inputs > 6){
         *out_min = tensor_get_float(self->inputs[6],0);
@@ -158,14 +188,15 @@ static int div_depthwise_execute(struct nn_node *self, struct nn_graph *nn)
         *out_min = 2147483648.0f;
         *out_max = -2147483648.0f;
 
-        for(int d = 0; d < depth; d++){
+        for(int d = 0; d < denominator_size; d++){
             float denominator = b_min_float + ((float)b_data[d]) * b_step;
+            if(denominator == 0.f){
+                logmsg(nn,0,"Problem - divided by zero, add Episilon");
+                denominator = DIV_EPISILON;
+            }
             if (denominator > 0){
                 if(a_max_float/denominator > *out_max) *out_max = a_max_float/denominator;
                 if(a_min_float/denominator < *out_min) *out_min = a_min_float/denominator;
-            }
-            else if(denominator == 0.f){
-                return errlog(nn,"division by zero");
             }
             else{
                 if(a_min_float/denominator > *out_max) *out_max = a_min_float/denominator;
@@ -187,10 +218,12 @@ static int div_depthwise_execute(struct nn_node *self, struct nn_graph *nn)
     //   1. Calculate a map from the depths' true range to quantized output
     //   2. Go through the values at that depth and map them to the output
     uint8_t map[256];
-    for(int d = 0; d < depth; d++){
+    for(int d = 0; d < denominator_size; d++){
         float denominator = b_min_float + ((float)b_data[d]) * b_step;
-        if(denominator == 0.f) return errlog(nn,"division by zero");
-
+        if(denominator == 0.f){
+            logmsg(nn,0,"Problem - divided by zero, add Episilon");
+            denominator = DIV_EPISILON;
+        }
         // Calculate map
         for(int i = 0; i <= 255 ; i++){
             float numerator = a_min_float + ((float)i) * a_step;
@@ -199,10 +232,177 @@ static int div_depthwise_execute(struct nn_node *self, struct nn_graph *nn)
         }
 
         // Map the input to the output
-        for(int i = d; i < elements; i+=depth){
+        for(int i = d; i < elements; i+=denominator_size){
             out_data[i] = map[a_data[i]];
         }
     }
+
+    return 0;
+}
+
+static void convert_work(
+    struct nn_graph *nn,
+    void *thrinfo)
+{
+    struct convert_state *thrdesc = (struct convert_state *)thrinfo;
+    float *min_batch = thrdesc->min_array;
+    float *max_batch = thrdesc->max_array;
+
+    int32_t out_stride = thrdesc->out_stride;
+    int32_t outer_count = 1;
+
+    float out_min = thrdesc->out_min;
+    float out_level_recip = thrdesc->out_level_recip;
+    int32_t jobid = 0;
+    while (jobid = __sync_fetch_and_add(&thrdesc->input_next, 1), jobid < thrdesc->n_batchinputs) {
+        const uint8_t *in_data = thrdesc->input_data;
+        uint8_t* out_data = thrdesc->output_data;
+        in_data += jobid*out_stride;
+        out_data += jobid*out_stride;
+        uint32_t copylen = out_stride;
+
+        l2fetch(in_data, copylen * sizeof(uint16_t), copylen * sizeof(uint16_t), outer_count);
+
+        float in_min = min_batch[jobid];
+        float in_max = max_batch[jobid];
+        in_min = fminf(0.0f, in_min); // in_min <= 0.0f
+        float in_level = flt_div_255(in_max-in_min);
+
+        int32_t offset = max_i32(0, roundf_i32((in_min - out_min)/in_level));
+        int32_t gaint = roundf_i32(out_level_recip*in_level* 32768.0f);
+        int32_t gain = min_i32(32767, gaint);
+
+        if( offset != 0 || gain < 0x7fc0) {    // scale the input into common range
+            memconvert_hvx(
+                out_data,
+                in_data,
+                copylen,
+                offset,
+                gain,
+                out_stride,
+                outer_count);
+        }
+        else {                                 // is unity gain (0->0, 255->255)
+            vmemcpy_2d_general_asm(
+                copylen,                       // bytes wide
+                outer_count,                   // rows
+                out_data,                      // destination address, any allowed
+                out_stride,                    // row pitch of dest; any allowed
+                in_data,                       // source address, any allowed
+                copylen);                      // source stride, any
+        }
+    }
+
+    // signal complete in thread.
+    nn_sem_post(&thrdesc->done_sem);
+}
+
+// If denominator tensor shape is (batches, 1, 1, 1), we could do min/max
+// scale division (like scalar divide) for each batch data and then convert
+// batch data to unify min/max with hvx convert
+static int div_batchwise_execute(struct nn_node *self, struct nn_graph *nn)
+{
+    logmsg(nn,2,"div batchwise execute. self=%p ",self);
+    const struct tensor *input_tensor = self->inputs[0];
+    uint8_t *input_data = input_tensor->data;
+    float in_min = tensor_get_float(self->inputs[2],0);
+    float in_max = tensor_get_float(self->inputs[3],0);
+
+    const struct tensor *b_tensor = self->inputs[1];
+
+    uint8_t *b_data = b_tensor->data;
+    uint32_t batch_size = b_tensor->shape.batches;
+    float b_min = tensor_get_float(self->inputs[4],0);
+    float b_max = tensor_get_float(self->inputs[5],0);
+    float b_step = (b_max - b_min) / 255.f;
+
+    struct tensor *out_tensor = self->outputs[0];
+    uint8_t *out_data = out_tensor->data;
+
+    struct tensor *out_min_tensor = self->outputs[1];
+    struct tensor *out_max_tensor = self->outputs[2];
+
+    float *out_min = out_min_tensor->data;
+    float *out_max = out_max_tensor->data;
+    *out_min = 0.0f;
+    *out_max = 0.0f;
+
+    tensor_out_prepare_normal(out_min_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
+    tensor_out_prepare_normal(out_max_tensor, 1, 1, 1, 1, NN_TYPE_FLOAT);
+    tensor_out_prepare_normal(out_tensor, input_tensor->shape.batches, input_tensor->shape.height,
+                              input_tensor->shape.width, input_tensor->shape.depth, NN_TYPE_QUINT8);
+
+    uint32_t batch_elements = input_tensor->shape.height*input_tensor->shape.width*input_tensor->shape.depth;
+    uint8_t * div_numerator_ptr = input_data;
+    uint8_t * convert_buffer = nn->scratch;
+    size_t element_offset = (batch_elements*batch_size+ALIGN_SIZE-1)&~(ALIGN_SIZE-1);
+    float * out_min_batch = (float *)((uint8_t *)convert_buffer + element_offset);
+    float * out_max_batch = (float *)((uint8_t *)out_min_batch + batch_size*sizeof(float));
+
+    for (uint32_t i=0; i<batch_size; i++) {
+        float scalar = b_min + ((float)b_data[i]) * b_step;
+        if(scalar == 0.f) {
+            logmsg(nn,0,"Problem - divided by zero, add Episilon");
+            scalar = DIV_EPISILON;
+        }
+        // if the quotient is positive then we simply divide the min and max
+        // and copy the data as-is
+        // otherwise, we divide the min and max, swap them and then flip
+        // the data around 128 so that x becomes 255-x
+        if(scalar > 0.f){
+            out_min_batch[i] = in_min / scalar;
+            out_max_batch[i] = in_max / scalar;
+            // copy
+            memcpy(convert_buffer, div_numerator_ptr, batch_elements);
+        }
+        else{
+            out_min_batch[i] = in_max / scalar;
+            out_max_batch[i] = in_min / scalar;
+
+            int elements_128aligned = batch_elements / 128;
+            elements_128aligned *= 128;
+
+            struct flipdata td = {
+                    .in_data = div_numerator_ptr,
+                    .out_data = convert_buffer,
+                    .num_elements = elements_128aligned
+            };
+            nn_sem_init(&td.donesem,0);
+            nn_os_work_for_vector(nn,flip_values,&td);
+            nn_sem_wait(&td.donesem);
+
+            for(int i = elements_128aligned; i < batch_elements; i++) {
+                convert_buffer[i] = 255 - div_numerator_ptr[i];
+            }
+        }
+        // find out the min/max among batch min/max data
+        *out_min = fminf(*out_min, out_min_batch[i]);
+        *out_max = fmaxf(*out_max, out_max_batch[i]);
+        div_numerator_ptr += batch_elements;
+        convert_buffer += batch_elements;
+    }
+
+    float out_level_recip = 255.0f / (*out_max - *out_min);
+
+    struct convert_state rundesc;
+    // fire the threads
+    rundesc.n_batchinputs = batch_size;
+    rundesc.out_stride = batch_elements;
+    rundesc.out_min = *out_min;
+    rundesc.out_level_recip = out_level_recip;
+    rundesc.input_next = 0;
+    nn_sem_init(&rundesc.done_sem, 0);
+
+    rundesc.input_data = (uint8_t *)nn->scratch;
+    rundesc.min_array = (float *)out_min_batch;
+    rundesc.max_array = (float *)out_max_batch;
+    rundesc.output_data = out_data;
+    // convert data to unify min/max
+    int32_t num_actual_threads = min_i32(CONVERT_MAX_THREADS, batch_size);
+    for (int32_t i = 0; i < num_actual_threads; i++) {
+        nn_os_work_for_vector(nn, convert_work, &rundesc);
+    }
+    nn_sem_wait_n_times(&rundesc.done_sem, num_actual_threads);
 
     return 0;
 }
@@ -224,7 +424,10 @@ static int div_scalar_execute(struct nn_node *self, struct nn_graph *nn)
 	float b_step = (b_max - b_min) / 255.f;
 
 	float scalar = b_min + ((float)b_data[0]) * b_step;
-	if(scalar == 0.f) return errlog(nn,"division by zero");
+	if(scalar == 0.f) {
+        logmsg(nn,0,"Problem - divided by zero, add Episilon");
+        scalar = DIV_EPISILON;
+	}
 	
 	struct tensor *out_tensor = self->outputs[0];
 	uint8_t *out_data = out_tensor->data;
@@ -339,13 +542,19 @@ static int div_scalar_static_minmax_execute(struct nn_node *self, struct nn_grap
 
 static int div_execute(struct nn_node *self, struct nn_graph *nn){
 
-    if(self->inputs[1]->shape.depth == 1){
+    if( self->inputs[1]->shape.batches == 1 &&
+        self->inputs[1]->shape.depth == 1 ){
         if(self->n_inputs == 6){
             return div_scalar_execute(self, nn);
         } else {
             return div_scalar_static_minmax_execute(self, nn);
         }
-    } else {
+    } else if (self->inputs[1]->shape.depth == 1) {
+        if (self->inputs[0]->shape.batches != self->inputs[1]->shape.batches)
+            return errlog(nn,"input batch size mismatch for broadcast");
+        return div_batchwise_execute(self, nn);
+    }
+    else {
         return div_depthwise_execute(self, nn);
     }
 }
@@ -353,10 +562,25 @@ static int div_execute(struct nn_node *self, struct nn_graph *nn){
 static int div_check(struct nn_node *self, struct nn_graph *nn){
     if(self->n_inputs != 6 && self->n_inputs != 8)
         return errlog(nn,"must have 6 or 8 inputs");
-    if(self->inputs[1]->shape.batches != 1
-       || self->inputs[1]->shape.height != 1
+    if(self->inputs[1]->shape.height != 1
        || self->inputs[1]->shape.width != 1){
         return errlog(nn,"op only supported for scalar and 1d tensors");
+    }
+    if(self->inputs[1]->shape.batches != 1){
+        if (self->inputs[0]->shape.batches!=self->inputs[1]->shape.batches) {
+            return errlog(nn,"div batch shape mismatch");
+        }
+        if (self->inputs[1]->shape.depth != 1) {
+            if(self->inputs[0]->shape.height != 1
+               || self->inputs[0]->shape.width != 1){
+                return errlog(nn,"op only support elementwise div when both batch and depth not equal to 1");
+            }
+        }
+        uint32_t data_maxsize = (self->inputs[0]->max_size+ALIGN_SIZE-1)&~(ALIGN_SIZE-1);
+        data_maxsize += 2*self->inputs[1]->shape.batches*sizeof(float);
+        if (nn_scratch_grow(nn,data_maxsize)) {
+            return errlog(nn,"couldn't allocate buffer for div batchwise operation");
+        }
     }
     logmsg(nn,2,"div node %p check OK",self);
     return 0;

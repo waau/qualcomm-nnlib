@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -83,6 +83,8 @@ __QAIC_STUB_EXPORT int (*hexagon_nn_get_nodetype_fnptr)(hexagon_nn_nn_id, hexago
 __QAIC_STUB_EXPORT int (*hexagon_nn_multi_execution_cycles_fnptr)(hexagon_nn_nn_id, unsigned int*, unsigned int*) = &hexagon_nn_multi_execution_cycles_impl;
 __QAIC_STUB_EXPORT int (*hexagon_nn_get_power_fnptr)(int) = &hexagon_nn_get_power_impl;
 __QAIC_STUB_EXPORT int (*hexagon_nn_set_graph_option_fnptr)(hexagon_nn_nn_id, const char*, int) = &hexagon_nn_set_graph_option_impl;
+__QAIC_STUB_EXPORT int (*hexagon_nn_execute_with_option_fnptr)(hexagon_nn_nn_id, const hexagon_nn_tensordef*, int, hexagon_nn_tensordef*, int, hexagon_nn_execute_info*, const hexagon_nn_execute_option*, int) = &hexagon_nn_execute_with_option_impl;
+
 
 __QAIC_STUB_EXPORT int (*hexagon_nn_domains_config_fnptr)(remote_handle64) = &hexagon_nn_domains_config_impl;
 __QAIC_STUB_EXPORT int (*hexagon_nn_domains_config_with_options_fnptr)(remote_handle64, const hexagon_nn_uint_option*, int, const hexagon_nn_string_option*, int) = &hexagon_nn_domains_config_with_options_impl;
@@ -121,5 +123,6 @@ __QAIC_STUB_EXPORT int (*hexagon_nn_domains_get_nodetype_fnptr)(remote_handle64,
 __QAIC_STUB_EXPORT int (*hexagon_nn_domains_multi_execution_cycles_fnptr)(remote_handle64, hexagon_nn_nn_id, unsigned int*, unsigned int*) = &hexagon_nn_domains_multi_execution_cycles_impl;
 __QAIC_STUB_EXPORT int (*hexagon_nn_domains_get_power_fnptr)(remote_handle64, int) = &hexagon_nn_domains_get_power_impl;
 __QAIC_STUB_EXPORT int (*hexagon_nn_domains_set_graph_option_fnptr)(remote_handle64, hexagon_nn_nn_id, const char*, int) = &hexagon_nn_domains_set_graph_option_impl;
+__QAIC_STUB_EXPORT int (*hexagon_nn_domains_execute_with_option_fnptr)(remote_handle64, hexagon_nn_nn_id, const hexagon_nn_tensordef*, int, hexagon_nn_tensordef*, int, hexagon_nn_execute_info*, const hexagon_nn_execute_option*, int) = &hexagon_nn_domains_execute_with_option_impl;
 
 #endif //HEXAGON_NN_HEXNN_DSP_SMART_WRAPPER_API_H

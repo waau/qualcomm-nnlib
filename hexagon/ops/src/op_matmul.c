@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -34,9 +34,9 @@
  *
  */
 /*
- * 
+ *
  * Now that that's out of the way, let's get to the good stuff.
- * 
+ *
  * This contains the code for matrix multiply op
  */
 
@@ -50,8 +50,8 @@
 #endif
 #define ALIGN_SIZE 128
 
-#define MAXMUL_THREADS 2
-
+#define BPAD 32
+#define APAD 16
 /* 8x8 matrix multiply --> 32 bits */
 
 struct tdata {
@@ -60,6 +60,24 @@ struct tdata {
 	int32_t retval;
 	uint32_t tid;
 	nn_sem_t *donesem;
+};
+
+struct repack_runstate {
+	struct repack_info * info;
+	nn_sem_t done_sem;
+};
+
+struct repack_info {
+	uint8_t * filt_data;
+	int32_t filt_offset;
+	uint32_t matmul_batchcnt;
+	uint8_t * dst;
+	uint32_t filt_elements_pad;
+	uint32_t out_depth_pad;
+	uint32_t filt_batches;
+	uint32_t filt_depth;
+	uint32_t filt_elements;
+	uint32_t out_depth;
 };
 
 static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
@@ -91,6 +109,25 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 	uint32_t out_width = (a_batches*a_height*a_width*a_depth)/dotprod_len;
 	uint32_t out_depth = b_depth;
 
+	logmsg(nn,2,"matmul execute. self=%p",self);
+	logmsg(nn,2,"matmul in dims: %lux%lux%lux%lu * %lux%lux%lux%lu",
+		a_batches,a_height,a_width,a_depth,
+		b_batches,b_height,b_width,b_depth);
+
+	if (self->node_type == OP_QuantizedBatchMatMul_8x8to32){
+		if (a_batches != b_batches || a_height != b_height) {
+			return errlog(nn,"not support mismatched batch size in batch matmul");
+		}
+		
+		out_batches = b_batches;
+		out_height = b_height;
+		out_width = (a_width*a_depth)/dotprod_len;
+	}
+	else{
+		if (b_height != 1) return errlog(nn,"fixme: support B height?");
+		if (b_batches != 1) return errlog(nn,"fixme: support B batches");
+	}
+
 	float a_max_float = tensor_get_float(max_a_tensor,0);
 	float a_min_float = tensor_get_float(min_a_tensor,0);
 	float b_max_float = tensor_get_float(max_b_tensor,0);
@@ -116,17 +153,9 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 	int32_t a_offset = quantize_uint8(0.0f,a_min_float,a_max_float);
 	int32_t b_offset = quantize_uint8(0.0f,b_min_float,b_max_float);
 
-	logmsg(nn,2,"matmul execute. self=%p",self);
-	logmsg(nn,2,"matmul in dims: %lux%lux%lux%lu * %lux%lux%lux%lu",
-		a_batches,a_height,a_width,a_depth,
-		b_batches,b_height,b_width,b_depth);
 	logmsg(nn,2,"reshaping A to %lux%lu",out_width,dotprod_len);
 	logmsg(nn,2,"matmul out dims: %lux%lux%lux%lu",
 			out_batches,out_height,out_width,out_depth);
-	//if (a_height != 1  || b_height != 1) return errlog(nn,"oops, height != 1");
-	if (b_height != 1) return errlog(nn,"fixme: support B height?");
-	if (b_batches != 1) return errlog(nn,"fixme: support B batches");
-
 
 	if( tensor_out_prepare_normal( out_tensor,out_batches,out_height,out_width,out_depth , NN_TYPE_INT32)!= 0){
 		return errlog(nn,"output too small");
@@ -144,20 +173,21 @@ static inline int matmul_execute(struct nn_node *self, struct nn_graph *nn,
 static void matmul_worker(struct nn_graph *nn, void *vtdata)
 {
 	struct tdata *td = vtdata;
-	td->retval = matmul_execute(td->self,nn,td->f, td->tid);
+	td->retval = matmul_execute(td->self, nn, td->f, td->tid);
+
 	nn_sem_post(td->donesem);
 }
 
 static int matmul_launch(struct nn_node *self, struct nn_graph *nn,
 		void (*f)(struct nn_node *self, struct nn_graph *nn, int32_t a_offset, int32_t b_offset, uint32_t tid))
 {
-	struct tdata td[MAXMUL_THREADS];
+	struct tdata td[nn->num_vector_threads];
 	nn_sem_t sem;
 
 	nn_scratch_reset(nn);
 
 	nn_sem_init(&sem,0);
-	for (int32_t i = 0; i < MAXMUL_THREADS; i++) {
+	for (int32_t i = 0; i < nn->num_vector_threads; i++) {
 		td[i].f = f;
 		td[i].self = self;
 		td[i].tid = i;
@@ -166,7 +196,7 @@ static int matmul_launch(struct nn_node *self, struct nn_graph *nn,
 		nn_os_work_for_vector(nn, matmul_worker, &td[i]);
 	}
 	int res = 0;
-	for (int32_t i = 0; i < MAXMUL_THREADS; i++) {
+	for (int32_t i = 0; i < nn->num_vector_threads; i++) {
 		nn_sem_wait(&sem);
 		res |= td[i].retval;
 	}
@@ -204,8 +234,8 @@ static inline void matmul_ref(
 	if( tid != 0)
 		return;
 
-    logmsg(nn,2,"a_widthxa_depth=%lux%lu a_offset=%ld b_offset=%ld",
-    		out_width, b_width, a_offset, b_offset);
+	logmsg(nn,2,"a_widthxa_depth=%lux%lu a_offset=%ld b_offset=%ld",
+			out_width, b_width, a_offset, b_offset);
 	for (y = 0; y < out_width; y++) {
 		for (x = 0; x < out_depth; x++) {
 			sum = 0;
@@ -215,6 +245,64 @@ static inline void matmul_ref(
 				sum += adata * bdata;
 			}
 			out[x+y*out_depth] = sum;
+		}
+	}
+	logmsg(nn,2,"matmul execute ref done!");
+}
+
+static inline void batchmatmul_ref(
+		struct nn_node *self,
+		struct nn_graph *nn,
+		int32_t a_offset,
+		int32_t b_offset,
+		uint32_t tid
+	)
+{
+	const struct tensor *a_tensor = self->inputs[0];
+	const struct tensor *b_tensor = self->inputs[1];
+	struct tensor *out_tensor = self->outputs[0];
+
+	uint8_t *a = a_tensor->data;
+	uint8_t *b = b_tensor->data;
+	int32_t *out = out_tensor->data;
+
+	int32_t adata;
+	int32_t bdata;
+	int32_t sum;
+	int32_t batch;
+	int32_t x;
+	int32_t y;
+	int32_t i;
+
+	uint32_t b_batch = b_tensor->shape.batches;
+	uint32_t b_height = b_tensor->shape.height;
+	uint32_t b_width = b_tensor->shape.width;
+	uint32_t b_depth = b_tensor->shape.depth;
+	uint32_t out_matmul_blocknum = (a_tensor->shape.batches*a_tensor->shape.height*a_tensor->shape.width*a_tensor->shape.depth)/
+	                               (b_batch*b_height*b_width);
+	uint32_t out_depth = b_depth;
+
+	uint32_t matmul_batchcnt = b_batch*b_height;
+
+	if( tid != 0)
+		return;
+
+    logmsg(nn,2,"a_widthxa_depth=%lux%lu a_offset=%ld b_offset=%ld",
+	        out_matmul_blocknum, b_width, a_offset, b_offset);
+	for (batch = 0; batch < matmul_batchcnt; batch++) {
+	    uint8_t *a_batchOffset = a+batch*a_tensor->shape.width*a_tensor->shape.depth;
+	    uint8_t *b_batchOffset = b+batch*b_width*b_depth;
+	    int32_t *out_batchOffset = out+batch*out_matmul_blocknum*out_depth;
+		for (y = 0; y < out_matmul_blocknum; y++) {
+			for (x = 0; x < out_depth; x++) {
+				sum = 0;
+				for (i = 0; i < b_width; i++) {
+					adata = a_batchOffset[i+y*b_width] - a_offset;
+					bdata = b_batchOffset[x+i*b_depth] - b_offset;
+					sum += adata * bdata;
+				}
+				out_batchOffset[x+y*out_depth] = sum;
+			}
 		}
 	}
 	logmsg(nn,2,"matmul execute ref done!");
@@ -262,7 +350,7 @@ static inline void matmul_asm(
 				a_batches, a_depth, a_batches,a_depth_pad, a_offset, b_offset);
 		// depth per thread: divide depth by (32*MAX_THREADS), rounded up; then *32
 		//
-		int depth_thread = ((out_depth + MAXMUL_THREADS*32 - 1) / (MAXMUL_THREADS*32))<<5;
+		int depth_thread = ((out_depth + nn->num_vector_threads*32 - 1) / (nn->num_vector_threads*32))<<5;
 		int out_depth_start = tid * depth_thread;
 		int out_depth_end = min_i32( out_depth_start+depth_thread, out_depth);
 		int out_depth_todo = out_depth_end - out_depth_start;
@@ -318,7 +406,7 @@ static inline void matmul_asm(
 			}
 			if( is_misaligned ){	// copy remnant from the buffer
 				vmemcpy_asm( optr, temp_buf, out_depth_todo * sizeof(int32_t));
-			}				
+			}
 		}
 	}
 	else
@@ -333,6 +421,233 @@ static inline void matmul_asm(
 	logmsg(nn,2,"matmul execute asm done!");
 }
 
+static inline void batchmatmul_asm(
+		struct nn_node *self,
+		struct nn_graph *nn,
+		int32_t a_offset,
+		int32_t b_offset,
+		uint32_t tid
+		)
+{
+	const struct tensor *a_tensor = self->inputs[0];
+	const struct tensor *b_tensor = self->inputs[1];
+	struct tensor *out_tensor = self->outputs[0];
+
+	uint8_t *a = a_tensor->data;
+	int32_t *out = out_tensor->data;
+
+	uint32_t a_depth = b_tensor->shape.width;
+	uint32_t b_depth = b_tensor->shape.depth;
+	uint32_t matmul_batchcnt = b_tensor->shape.batches*b_tensor->shape.height;
+	uint32_t a_dotbatches = (a_tensor->shape.batches*a_tensor->shape.width*a_tensor->shape.height*a_tensor->shape.depth)/a_depth;
+	if (matmul_batchcnt > 1) {
+	    a_dotbatches = (a_tensor->shape.width*a_tensor->shape.depth)/a_depth;
+	}
+	uint32_t out_matmul_blocknum = (a_tensor->shape.batches*a_tensor->shape.height*a_tensor->shape.width*a_tensor->shape.depth)/
+	                               (b_tensor->shape.batches*b_tensor->shape.height*b_tensor->shape.width);
+	uint32_t out_depth = b_depth;
+	int32_t i;
+
+	int a_depth_pad = (a_depth + APAD-1)&~(APAD-1);
+	int b_depth_pad = (b_depth + BPAD-1)&~(BPAD-1);
+
+	// ASM code may be used if a_dotbatches ==1, or if a_depth is a multiple of 16.
+	// (since we need to keep aligned by 16 on a_ptr).
+	// If the output depth is not a multiple of 32, some batches will have misaligned output addresses.
+	// Each time we start a new batch, if the output address isn't aligned, we compute it to an aligned temp
+	// and copy those to the output using vmemcpy.
+	// When multiple threads are in use, we also need to do this when the *end* of the depth chunk is
+	// misaligned, to avoid over-writing the start of the next batch -- see comment below and 'all_misaligned'.
+	//
+
+	if( (a_dotbatches == 1 && matmul_batchcnt == 1) || a_depth == a_depth_pad)	// can use hvx
+	{
+		logmsg(nn,2,"Pad A: a_widthxa_depth=%lux%lu,a_widthxa_depth_pad=%lux%d, a_offset=%ld b_offset=%ld",
+				a_dotbatches, a_depth, a_dotbatches,a_depth_pad, a_offset, b_offset);
+		// depth per thread: divide depth by (32*MAX_THREADS), rounded up; then *32
+		//
+		int depth_thread = ((out_depth + nn->num_vector_threads*32 - 1) / (nn->num_vector_threads*32))<<5;
+		int out_depth_start = tid * depth_thread;
+		int out_depth_end = min_i32( out_depth_start+depth_thread, out_depth);
+		int out_depth_todo = out_depth_end - out_depth_start;
+		if( out_depth_end <= out_depth_start)
+			return;
+
+		// allocate a work buffer, enough to hold our depth slice (only needed if depth misaligned).
+		int32_t * temp_buf = NULL;
+		if( ( out_depth & 31)!= 0 ){
+			temp_buf = (int32_t *) nn_scratch_alloc( nn, sizeof(int32_t) * ((out_depth_todo+31)&~31u) );
+			if( temp_buf == NULL) {
+				errlog(nn, "can't alloc scratch for %d ints", (int) out_depth_todo);
+				goto use_ref_code ;
+			}
+		}
+		// out_depth_start is always a multiple of 32. If out_depth_end is *not* a multiple
+		// of 32, we need to use the temp-copy on all operations, even if the start is aligned;
+		// otherwise we could spill over the end of the batch on top of work done by the other
+		// thread. Exception: if there is only one active thread, since out_depth <= 32, we don't
+		// need to do this (so, thread 0 never needs to); also if a_dotbatches ==1 we don't need this.
+		//
+		int all_misaligned = (out_depth_end&31)!= 0 && tid != 0 && a_dotbatches > 1;
+		int b_width_pad = a_depth_pad;
+
+		for (uint32_t batch = 0; batch < matmul_batchcnt; batch++) {
+			int32_t a_batchOffset = batch*a_tensor->shape.width*a_tensor->shape.depth;
+			int32_t b_batchOffset = batch*b_width_pad*b_depth_pad;
+			int32_t out_batchOffset = batch*out_matmul_blocknum*out_depth;
+			uint8_t const * bptr = (uint8_t const *)self->opaque + b_batchOffset;		// read 'b side' from here...
+			for( uint32_t ibatch = 0; ibatch < a_dotbatches; ibatch++){
+				uint8_t *aptr = a + a_depth_pad * ibatch + a_batchOffset;
+				l2fetch(aptr, a_depth_pad, a_depth_pad, 1);
+				l2fetch(bptr+ out_depth_start*a_depth_pad, a_depth_pad, a_depth_pad, min_i32(32, out_depth_todo));
+
+				int outpos = out_depth * ibatch + out_depth_start + out_batchOffset; 	// offset of batch in output area.
+				int32_t *optr = out + outpos;		// actual output pos
+				int32_t *wptr = optr;				// output for the asm op
+				int is_misaligned = (outpos & 31) != 0 || all_misaligned;
+				if( is_misaligned)
+					wptr = temp_buf;		// if misaligned,store here instead
+				// loop through, do 32 outputs at once.
+				// if misaligned, on each 4 loops, copy out the temp data.
+				for(i = out_depth_start; i < out_depth_end; i+=32) {
+						wait_for_l2fetch();
+
+					if ((i+32)< out_depth_end)
+							l2fetch(bptr+(i+32)*a_depth_pad, a_depth_pad, a_depth_pad, min_i32(32, out_depth_end -i-32));
+
+					gemvmpybbw_asm(
+						aptr,
+						-a_offset,
+						bptr+i*a_depth_pad,
+						-b_offset,
+						(int*) wptr,
+						min_i32(32, out_depth_end -i),
+						a_depth_pad);
+					wptr += 32;
+				}
+				if( is_misaligned ){	// copy remnant from the buffer
+					vmemcpy_asm( optr, temp_buf, out_depth_todo * sizeof(int32_t));
+				}
+			}
+		}
+	}
+	else
+	{
+		if( tid !=0)
+			return;
+	use_ref_code:
+		batchmatmul_ref(self, nn, a_offset, b_offset, tid);
+		logmsg(nn,2,"matmul execute asm does not handle this case, for now use reference C code!");
+
+	}
+	logmsg(nn,2,"matmul execute asm done!");
+}
+
+// load 64 bytes at each of 4 offsets from pos (using unalinged vector loads)
+// and interleave them into 2 vectors.
+//  Load:
+//    A0 ... A31   a0 .. a31
+//    B0 ... B31   b0 .. b31
+//    C0 ... C31   c0 .. c31
+//    D0 ... D31   d0 .. d31
+//  result is:
+//    A0 B0 C0 D0 A1 B1 C1 D1 ... C31 D31   (lo vector)
+//    a0 b0 c0 d0 a1 b1 c1 d1 ... c31 d31   (hi vector)
+static inline HVX_VectorPair
+collect_double_4slice( uint8_t const * pos, int32_t depth_memstride )
+{
+    HVX_Vector v0 = q6op_V_vldu_A( (HVX_Vector const*)pos );  pos += depth_memstride;
+    HVX_Vector v1 = q6op_V_vldu_A( (HVX_Vector const*)pos );  pos += depth_memstride;
+    HVX_Vector v2 = q6op_V_vldu_A( (HVX_Vector const*)pos );  pos += depth_memstride;
+    HVX_Vector v3 = q6op_V_vldu_A( (HVX_Vector const*)pos );  pos += depth_memstride;
+    HVX_Vector shuf01 = Q6_V_lo_W(Q6_W_vshuff_VVR( v1,v0,-1));      // shuffle these
+    HVX_Vector shuf23 = Q6_V_lo_W(Q6_W_vshuff_VVR( v3,v2,-1));      // and these
+    return  Q6_W_vshuff_VVR( shuf23, shuf01,-2);         // and shuff together.
+}
+
+// Matmul is to take column data from input matrix A and row data from matrix B to do multiply and sum up. 
+// But column data from matrix A is not contiguous data in memory. It is not well organized for vector mul directly.
+// To do contiguous elementwise multiply, we transform it from column distribution to be row distribution in 4 bytes(4*32=128).
+// This function is to perform the same function as transpack in pad2d.c.
+// Here is an example
+/*
+  Input data sequence format
+       <----------------------M------------------->
+       <32>
+
+ ^  ^  0000...
+ |  |  1111...
+ |  4  2222...
+ |  v  3333...
+ |
+ K
+ |
+ |
+ |
+ v
+  Transformed Output data sequence format
+  M and K dimention are transposed
+  32x4 block Data is flattened to be 128x1
+       <----------------------K*128/4------------------->
+       <-------------128---------->
+
+ ^  ^  012301230123012301230123....
+ |
+ M/32
+ |
+ v
+ */
+static inline void transpack_hvx(
+  const uint8_t* in_data, int filt_depth, int filt_batches, uint8_t* out_data) {
+	int in_stride = filt_batches*4;
+	int filt_depth_4unit = filt_depth>>2;
+	const uint8_t * srctr = in_data;
+	uint8_t * optr = out_data;
+
+	uint32_t leftover_32 = ((filt_batches&63) == 32);
+
+	int batch_64_units = filt_batches>>6;     // # of units of 64 (may be 0)
+	int out_32_stride = filt_depth*32;
+	for( int ib64 = 0; ib64 < batch_64_units; ib64 ++ ){
+		optr = out_data + ib64*2*out_32_stride;
+		// collect filt_depth_4unit full units of 4x64 now
+		for( int d4 = 0; d4 < filt_depth_4unit; d4 ++ ){
+			HVX_VectorPair vals = collect_double_4slice( srctr + in_stride*d4,  filt_batches );
+			*(HVX_Vector *)optr = Q6_V_lo_W( vals );                    // 64*ib64 ... 64*ib64+31
+			*(HVX_Vector *)(optr+out_32_stride) = Q6_V_hi_W( vals );    // 64*ib64+32 .. 64*ib64+63
+			optr += ALIGN_SIZE;
+		}
+		srctr += 64;
+	}
+	if (leftover_32) {
+		optr = out_data + batch_64_units*2*out_32_stride;
+		// collect filt_depth_4unit full units of 4x32 now
+		for( int d4 = 0; d4 < filt_depth_4unit; d4 ++ ){
+			HVX_VectorPair vals = collect_double_4slice( srctr + in_stride*d4,  filt_batches );
+			*(HVX_Vector *)optr = Q6_V_lo_W( vals );                    // 32*ib32 ... 32*ib32+31
+			optr += ALIGN_SIZE;
+		}
+	}
+    return;
+}
+
+static void repack_filter(struct nn_graph *nn,  void * rstpv) {
+
+    struct repack_runstate *rstp = (struct repack_runstate *)rstpv;
+    struct repack_info const * info = rstp->info;
+
+	nn_mutex_lock(&nn->scratch_mutex);
+	for (uint32_t batch = 0; batch < info->matmul_batchcnt; batch++) {
+	    uint32_t opaque_batchoffset = batch * info->filt_elements_pad * info->out_depth_pad;
+	    uint32_t filt_batchoffset = batch * info->filt_batches * info->filt_depth;
+	    pad2d(info->filt_data+filt_batchoffset,info->filt_elements,info->out_depth,
+				nn->scratch,info->filt_elements_pad,info->out_depth_pad,info->filt_offset);
+	    transpack_hvx(nn->scratch,info->filt_elements_pad,info->out_depth_pad,info->dst+opaque_batchoffset);
+	}
+	nn_mutex_unlock(&nn->scratch_mutex);
+
+    nn_sem_post(&rstp->done_sem);
+}
 
 static int matmul_execute_ref(struct nn_node *self, struct nn_graph *nn)
 {
@@ -344,14 +659,55 @@ static int matmul_execute_asm(struct nn_node *self, struct nn_graph *nn)
 	return matmul_launch(self,nn,matmul_asm);
 }
 
+static int matmul_batch_execute_asm(struct nn_node *self, struct nn_graph *nn)
+{
+	const struct tensor *mat_tensor = self->inputs[0];
+	const struct tensor *filt_tensor = self->inputs[1];
+
+	uint32_t filt_batches = filt_tensor->shape.filt_batches;
+	uint32_t filt_depth = filt_tensor->shape.filt_depth;
+	uint32_t matmul_batchcnt = filt_tensor->shape.batches*filt_tensor->shape.height;
+	uint32_t filt_elements = filt_depth;
+	uint32_t filt_elements_pad = (filt_elements + APAD - 1) & (~(APAD - 1));
+	uint32_t mat_dotbatches = (mat_tensor->shape.batches*mat_tensor->shape.width*mat_tensor->shape.height*mat_tensor->shape.depth)/filt_elements;
+	if (matmul_batchcnt > 1)
+		mat_dotbatches = (mat_tensor->shape.width*mat_tensor->shape.depth)/filt_elements;
+
+	if ((mat_dotbatches == 1 && matmul_batchcnt == 1) || filt_elements == filt_elements_pad) {	// can use hvx
+		const struct tensor *min_filt_tensor = self->inputs[4];
+		const struct tensor *max_filt_tensor = self->inputs[5];
+		float filt_max_float = tensor_get_float(max_filt_tensor,0);
+		float filt_min_float = tensor_get_float(min_filt_tensor,0);
+		int32_t filt_offset = quantize_uint8(0.0f,filt_min_float,filt_max_float);
+
+		uint32_t out_depth = filt_batches;
+		int out_depth_pad = (out_depth + BPAD - 1) & ~(BPAD-1);
+
+		struct repack_info info;
+		info.filt_data = filt_tensor->data;
+		info.filt_offset = filt_offset;
+		info.dst = (uint8_t *)self->opaque;
+		info.matmul_batchcnt = matmul_batchcnt;
+		info.filt_elements_pad = filt_elements_pad;
+		info.out_depth_pad = out_depth_pad;
+		info.filt_batches = filt_batches;
+		info.filt_depth = filt_depth;
+		info.filt_elements = filt_elements;
+		info.out_depth = out_depth;
+		struct repack_runstate rst;
+		rst.info = &info;
+
+		nn_sem_init( &rst.done_sem, 0);
+		nn_os_work_for_vector(nn, repack_filter, &rst );
+		nn_sem_wait( &rst.done_sem);
+	}
+	return matmul_launch(self,nn,batchmatmul_asm);
+}
 
 static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"Checking matmul node %p",self);
 
-
-#define BPAD 32
-#define APAD 16
 	const struct tensor *filt_tensor = self->inputs[1];
 	const struct tensor *min_filt_tensor = self->inputs[4];
 	const struct tensor *max_filt_tensor = self->inputs[5];
@@ -367,23 +723,49 @@ static int matmul_check_ref(struct nn_node *self, struct nn_graph *nn)
 	int out_depth_pad = (out_depth + BPAD - 1) & ~(BPAD-1);
 	uint32_t consts_size;
 	filt_elements_pad = (filt_elements_pad < 32)?32:filt_elements_pad;
-	consts_size = filt_elements_pad * out_depth_pad;
+	consts_size = filt_elements_pad * out_depth_pad + 256;
 	if (nn_scratch_grow(nn,consts_size)){
-		return errlog(nn,"couldn't allocate scratch buffer for const rearrangement");
+		return errlog(nn,"couldn't allocate scratch buffer for rearrangement and repack");
 	}
 	if (self->opaque == NULL) {
 		if ((self->opaque = nn_memalign(ALIGN_SIZE,consts_size)) == NULL) {
 			return errlog(nn,"couldn't allocate buffer for const rearrangement");
 		}
 	}
-	nn_scratch_grow(nn,filt_elements_pad*out_depth_pad+256);
 	logmsg(nn,2,"Pad B: filt_elements=%lu %lu,out_depth=%lu %d, filt_offset=%ld", filt_elements, out_depth, filt_elements_pad,out_depth_pad, filt_offset);
 
 	nn_mutex_lock(&nn->scratch_mutex);
 	pad2d(filt,filt_elements,out_depth,nn->scratch,filt_elements_pad,out_depth_pad,filt_offset);
-	transpack(nn->scratch,filt_elements_pad,out_depth_pad,self->opaque);
+	transpack_hvx(nn->scratch,filt_elements_pad,out_depth_pad,self->opaque);
 	nn_mutex_unlock(&nn->scratch_mutex);
 	logmsg(nn,2,"matmul node %p check OK",self);
+	return 0;
+}
+
+static int matmul_check(struct nn_node *self, struct nn_graph *nn)
+{
+	logmsg(nn,2,"Checking matmul node %p",self);
+
+	const struct tensor *filt_tensor = self->inputs[1];
+	uint32_t filt_batches = filt_tensor->shape.filt_batches;
+	uint32_t filt_depth = filt_tensor->shape.filt_depth;
+	uint32_t matmul_batchcnt = filt_tensor->shape.batches*filt_tensor->shape.height;
+	uint32_t out_depth = filt_batches;
+
+	uint32_t filt_elements = filt_depth;
+	uint32_t filt_elements_pad = (filt_elements + APAD - 1) & (~(APAD - 1));
+	int out_depth_pad = (out_depth + BPAD - 1) & ~(BPAD-1);
+	uint32_t consts_size;
+	filt_elements_pad = (filt_elements_pad < 32)?32:filt_elements_pad;
+	consts_size = matmul_batchcnt*filt_elements_pad*out_depth_pad+256;
+	if (nn_scratch_grow(nn,consts_size)){
+		return errlog(nn,"couldn't allocate scratch buffer for rearrangement and repack");
+	}
+	if (self->opaque == NULL) {
+		if ((self->opaque = nn_memalign(ALIGN_SIZE,consts_size)) == NULL) {
+			return errlog(nn,"couldn't allocate buffer for const rearrangement");
+		}
+	}
 	return 0;
 }
 
@@ -423,6 +805,15 @@ static struct nn_node *matmul_ctor(
 struct nn_node_ops nn_ops_for_QuantizedMatMul_8x8to32 = {
 	.execute = matmul_execute_asm,
 	.check = matmul_check_ref,
+	.ctor = matmul_ctor,
+	.dtor = matmul_dtor,
+	.n_inputs = NN_IOCOUNT(6),
+	.n_outputs = NN_IOCOUNT(3),
+};
+
+struct nn_node_ops nn_ops_for_QuantizedBatchMatMul_8x8to32 = {
+	.execute = matmul_batch_execute_asm,
+	.check = matmul_check,
 	.ctor = matmul_ctor,
 	.dtor = matmul_dtor,
 	.n_inputs = NN_IOCOUNT(6),

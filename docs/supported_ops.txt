@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -95,6 +95,7 @@ QuantizedEqual_8
 QuantizedGreater_8
 QuantizedGreaterEqual_8
 QuantizedGroupedConv2d_8x8p32to8
+QuantizedHardSwish_8
 QuantizedHeatmapMaxKP_8
 QuantizedLess_8
 QuantizedLessEqual_8
@@ -133,6 +134,8 @@ QuantizedSum_8to32
 QuantizedTanh_8
 QuantizedTile_8
 QuantizedTransposeConv2d_8x8p32to8
+Quantized_CastUInt8ToInt8
+Quantized_CastInt8ToUInt8
 Relu_f
 ReluX_f
 Requantize_32to8

@@ -42,6 +42,7 @@
 #include <quantize.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "supernode_clean_cache.h"
 #ifdef __hexagon__
 #include "hexagon_types.h"
 #else
@@ -1246,7 +1247,7 @@ static int fill_bias_buf(
 		gemsumb_val = info->gemsumb[i];
 		final = fast_i64_roundf(minout_bias_fval - gemsumb_val * info->in_offset) + extra;
 		if ( (int32_t)final != final){
-			return errlog(nn, "Final too big, will cause overflow.");
+			logmsg(nn,2,"Final too big, will cause overflow.");
 		}
 		logmsg(nn,3,"i=%d biasval%d=%d fval=%f minout_fval=%f gemsumb_val=%d extra=%d final=%d",
 			i,bias32?32:8,biasval,bias_fval,minout_bias_fval,gemsumb_val,extra,final);
@@ -1353,7 +1354,7 @@ load_channel_scales(struct nn_graph *nn,struct supernode_info_new *info,
 	int out_depth_roundup = (out_depth + 31) & ~31;
 	for( int i =0; i < out_depth; i++){
 		float scval = channel_scale_flts[i];
-		if( !( scval <= 1.0f && scval >= (float)(1./2048.))){
+		if( scval > 1.0f ){
 			return errlog(nn,"bad channel scale[%d]= %.8f",i,scval);
 		}
 		outp[i] = scval;
@@ -1502,14 +1503,4 @@ setup_initial_output_range( struct nn_graph *nn, struct supernode_info_new *info
     return 0;
 }
 
-// Invalidate the cache where the weights are stored to force scalar code to read correct weights
-static inline void supernode_cleaninv_weights(uint8_t *weights, int size)
-{
-#if defined(V66) && defined(__hexagon__)
-	int i;
-	for (i = 0; i < (size+63); i += 64) {
-		asm volatile ("dccleaninva(%0)" : :"r"(weights+i));
-	}
-#endif
-}
 #endif //SUPERNODE_UTILS_H

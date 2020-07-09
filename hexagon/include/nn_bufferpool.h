@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -141,7 +141,7 @@ bufpool_release( struct buffer_pool *bp, int bufind )
             if( (x&m) == 0) return 0;
         }
     }
-    return -1;
+    return errlog(NULL,"bufind = %d  out of range or buffer is already free ",bufind);
 }
 
 #endif // NN_BUFFERPOOL_H

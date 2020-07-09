@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -51,6 +51,14 @@
 #include "nn_graph_os_checkpoint.h"
 #include "nn_os_portable.h"
 
+#ifdef V66
+#define EARLY_HINT_VALUE 250
+#define WAKE_CPU_EARLY nn_os_send_early_wakeup(EARLY_HINT_VALUE)
+#else
+#define WAKE_CPU_EARLY -1
+#endif
+
+int nn_os_send_early_wakeup(uint32_t early_hint_value);
 int nn_os_update_main_thread_priority(struct nn_graph *nn, int *priority /* save priority before update if not null */);
 int nn_os_restore_main_thread_priority(struct nn_graph *nn, int priority);
 
@@ -280,6 +288,8 @@ static inline void *nn_realloc(void *ptr, size_t size) { return realloc(ptr,size
 static inline void nn_free(void *ptr) { return free(ptr); }
 
 #endif
+
+static inline void nn_free_array(void* ptr[], int n) { for(int i = 0 ; i < n ; i++) nn_free(ptr[i]); }
 
 #ifdef DEBUG_MEM
 #include <stdio.h>

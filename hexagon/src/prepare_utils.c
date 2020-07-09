@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -85,7 +85,13 @@ struct nn_node *create_node(
 		return NULL;
 	if( node_id == 0)
 		node_id = nn_graph_new_internal_node_id(nn);
-	return optab[operation]->ctor(nn, node_id, operation, padding, num_inputs, num_outputs, input_refs, output_defs);
+	struct nn_node *node;
+	node = optab[operation]->ctor(nn, node_id, operation, padding, num_inputs, num_outputs, input_refs, output_defs);
+	// add the new node's class flags
+	// to the class set.
+	uint32_t class_flags = node->ops->flags & NN_NODE_FLAGS_SET;
+	nn->op_class_set |= class_flags;
+	return node;
 }
 //
 // create a conversion.
@@ -208,7 +214,7 @@ handle_channelscaled_supernode( struct nn_graph *nn, struct nn_node *nodep)
 		unsigned new_min_nodeid = create_const_float_op( nn, scaleval * wmin);
 		unsigned new_max_nodeid = create_const_float_op( nn, scaleval * wmax);
 		unsigned new_one_nodeid = create_const_float_op( nn, 1.0f);
-		if( new_min_nodeid ==0 || new_max_nodeid == 0 || new_one_nodeid == 0) return -1;
+		if( new_min_nodeid ==0 || new_max_nodeid == 0 || new_one_nodeid == 0) return errlog(nn, "new op creation failed ");
 		nodep->input_refs[4].src_id = new_min_nodeid;
 		nodep->input_refs[5].src_id = new_max_nodeid;
 		nodep->input_refs[12].src_id = new_one_nodeid;
@@ -307,7 +313,7 @@ handle_channelscaled_supernode( struct nn_graph *nn, struct nn_node *nodep)
 	// just about done.
 	// install new weights - if applicable - and new input 12
 	unsigned new_one_nodeid = create_const_float_op( nn, 1.0f);
-	if( new_one_nodeid == 0) return -1;
+	if( new_one_nodeid == 0) return errlog(nn, "creation of const_float_op failed ");
 
 	if( new_wts_nid != 0 ){
 		nodep->input_refs[1].src_id = new_wts_nid;
@@ -438,3 +444,55 @@ int handle_oversize_d32_supernode( struct nn_graph *nn,  struct nn_node ** nodep
 	return 0;
 }
 
+int fold_requantize_multiply(struct nn_graph *nn, struct nn_node **node_p){
+	struct nn_node *node = *node_p;
+	static const int requant_ops[1] = {OP_Requantize_32to8};
+	static const int quantized_mul_output_count = 3;
+	static const int quantized_mul_input_count = 8;
+	static const int num_supported_requant_ops = 1;
+	static const int quantized_mul_input_count_no_min_max = 6;
+	struct nn_node *qdown_node =  find_unique_consumer(nn, node, num_supported_requant_ops, requant_ops, 0);
+	if (qdown_node == NULL){
+		//no requant node
+		return 0;
+	}
+	struct output new_outputs[quantized_mul_output_count];
+	struct input new_inputs[quantized_mul_input_count];
+	struct nn_node *new_node;
+	for(int i = 0; i < quantized_mul_input_count_no_min_max; ++i){
+		new_inputs[i] = node->input_refs[i];
+	}
+	//Take min/max from Requantize_32to8
+	new_inputs[6] = qdown_node->input_refs[3];
+	new_inputs[7] = qdown_node->input_refs[4];	
+	for(int i = 0; i < quantized_mul_output_count; ++i){
+		new_outputs[i] = qdown_node->output_defs[i];
+	}
+	//Reuse qdown node id
+	if((new_node = create_node(nn,
+		qdown_node->node_id,
+		OP_QuantizedMul_8x8to8,
+		node->padding,
+		quantized_mul_input_count,
+		quantized_mul_output_count,
+		new_inputs,
+		new_outputs))== NULL) return errlog(nn, "QuantitzedMul_8x8to8 replacement ctor failed");
+
+	if(replace_nodes(nn, node_p, new_node, node, qdown_node) != 0){
+		//Couldn't replace the nodes
+		//Call the new node dtor
+		new_node->ops->dtor(new_node, nn);
+		return errlog(nn, "Error replacing QuantitzedMul_8x8to32 with Reqauntization");
+	}
+	logmsg(nn, 3, "Created QuantitzedMul_8x8to8 id=%x (was Requant ID) from QuantitzedMul_8x8to32 and Reqauntization", new_node->node_id);
+	return 0;
+}
+
+int find_and_replace_mul_qdown_nodes(struct nn_graph *nn, struct nn_node **node_to_test_p){
+	if((*node_to_test_p)->node_type == OP_QuantizedMul_8x8to32){
+		//Found one!
+		return fold_requantize_multiply(nn, node_to_test_p);
+	}
+	//Not this one
+	return 0;
+}

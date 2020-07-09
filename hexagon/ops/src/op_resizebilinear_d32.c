@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -53,6 +53,8 @@
  *   0 -  Input tensor (d32)
  *   1   new_dims tensor (with height and width, int32)
  *   2,3 : input min,max
+ *   4   : (optional) align corners
+ *   5   : (optional) half pixel centers
  *  outputs:
  *   0 : output tensor
  *   1,2: min,max
@@ -91,6 +93,7 @@ struct bilin_runstate {
 	int out_ht;		// output size
 	int out_width;
 	int align_corners;
+	int half_pixel_centers;
 
 	run_all_fp run_all_func;
 	run_slice_fp run_slice_func;	// needed when run_all_func = bilin_interp_work
@@ -134,7 +137,7 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 	start_time =  nn_os_get_cycles(nn);
 #endif
 
-	logmsg(nn,2,"lrn_d32 execute. node=%p id=%x",self,self->node_id);
+	logmsg(nn,2,"resize_bilinear_d32 execute. node=%p id=%x",self,self->node_id);
 
 	int batches = in_tensor->shape.batches;
 	int height = in_tensor->shape.height;
@@ -178,8 +181,14 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 	runstate.with_hvx = 1;
 
 	runstate.align_corners = 0;
-	if (self->n_inputs == 5)
+	runstate.half_pixel_centers = 0;
+	if (self->n_inputs >= 5)
 		runstate.align_corners = *(int32_t *)(self->inputs[4]->data) != 0;
+	if (self->n_inputs >= 6)
+		runstate.half_pixel_centers = *(int32_t *)(self->inputs[5]->data) != 0;
+	if (runstate.align_corners && runstate.half_pixel_centers)
+		return errlog(nn, "align_corners flag and half_pixel_centers flag cannot work together");
+
 	//
 	// two back-ends:
 	//  (1) a special case, which requires 'width_pad_before' to be even, and 'x2' in both directions;
@@ -187,7 +196,7 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 	//
 	int use_hvx_general = 0;
 
-	if( !runstate.align_corners && new_height == height*2 && new_width == width *2 && (width_pad_before&1) == 0 ){
+	if( !runstate.align_corners && !runstate.half_pixel_centers && new_height == height*2 && new_width == width *2 && (width_pad_before&1) == 0 ){
 		runstate.run_all_func = bilin_interp_work;
 		logmsg(nn, 2, "resizebilinear using x2 mode");
 		if((width_pad_before&2) != 0 ){	// in padding is 2...
@@ -210,10 +219,13 @@ static int resize_bilinear_d32_execute(struct nn_node *self, struct nn_graph *nn
 		// different numbering scheme:
 		// lsb = top or bottom h slice
 		// then batch * (d32_pairs) in the rest.
+		logmsg(nn, 2,"resizebilinear using general_all_HVX");
 		runstate.jobs = 2*(batches * (runstate.tin.nd32+1)/2u);
 		runstate.run_all_func = do_bilin_interp_general_all_HVX;
 		use_hvx_general = 1;
 	}
+	logmsg(nn,2,"resize_bilinear_d32_execute, %d,%d,%d,%d -> %d,%d,%d,%d, align_corners=%d, half_pixel_centers=%d",
+				batches, height, width, depth, batches, new_height, new_width, depth, runstate.align_corners, runstate.half_pixel_centers);
 	nn_scratch_reset(nn);
 
 	int n_threads = min_i32(RESIZE_MAXTHREADS, runstate.jobs);
@@ -422,7 +434,7 @@ obtain_scaling_plan(
 	int wid_in = rstp->in_width;
 	int ht_out = rstp->out_ht;
 	int wid_out = rstp->out_width;
-	if( ht_in < 1 || wid_in < 1 || ht_out < 1 || wid_out <1 ) return -1;
+	if( ht_in < 1 || wid_in < 1 || ht_out < 1 || wid_out <1 ) return errlog(NULL,"wrong params in obtain_scaling_plan()  ");
 
 	int htable_needed = (wid_out+3)&~3;	// length needed for h scaling table.
 	struct resize_plan * planp =  (struct resize_plan *)self->opaque;
@@ -443,7 +455,7 @@ obtain_scaling_plan(
 	if( planp == NULL){
 		planp = (struct resize_plan *) nn_malloc(
 				sizeof(struct resize_plan) + sizeof(struct hcontroltab)*( htable_needed-1));
-		if( planp == NULL) return -1;
+		if( planp == NULL) return errlog(NULL," error in memory allocation for planp in obtain_scaling_plan() ");
 		self->opaque = (void*)planp;
 	}
 	rstp->planp = planp;
@@ -479,11 +491,20 @@ obtain_scaling_plan(
 	struct hcontroltab * outrecs = planp->hcontrol;
 
 	int64_t acc =  (1<<16);	// we take a 15-bit fraction, this is the rounding bias
+	// half pixel centers: when mapping out_x to in_x, each in_x becomes [in_x + 0.5*(in_width/out_width-1)].
+	if (rstp->half_pixel_centers) {
+		int64_t hpc_delta = (((int64_t)wid_in<<32) / (int64_t)wid_out_pi - ((int64_t)1<<32)) / 2;
+		acc += hpc_delta;
+	}
 	for( int i = 0; i < wid_out; i++){
 		int intpart = (acc>>32);		// integer part
 		unsigned fpart = (uint32_t)acc >> 17;	// fractional, 0..32767
 		if( intpart >= win_max){		// don't go beyond wid_in-1;
 			intpart = win_max;
+			fpart = 0;
+		}
+		else if (intpart < 0) {		//don't go below 0, only happen with half_pixel_centers
+			intpart = 0;
 			fpart = 0;
 		}
 		//printf("-- %3d %5d %d\n", i, intpart, fpart);
@@ -661,7 +682,6 @@ do_bilin_interp_general_all_HVX( struct nn_graph *nn, void *rstpv )
 
 		int64_t vacc = (1<<24);	// rounding bias for 7-bit fraction
 
-
 		int h_start = 0;		// range of h dimension to do
 		int h_end = planp->hsplit;
 		if( lower_h){				// do lower half
@@ -669,6 +689,12 @@ do_bilin_interp_general_all_HVX( struct nn_graph *nn, void *rstpv )
 			h_end = rstp->out_ht;
 			vacc = vacc_start_lower;
 		}
+		// half pixel centers: when mapping out_y to in_y, each in_y becomes [in_y + 0.5*(in_ht/out_ht-1)].
+		if (rstp->half_pixel_centers) {
+			int64_t hpc_delta = (((int64_t)rstp->in_ht<<32) / (int64_t)rstp->out_ht - ((int64_t)1<<32)) / 2;
+			vacc = vacc + hpc_delta;
+		}
+
 		int pf_progress = h_start;		// number loaded
 		int pf_request_min_1 = min_i32(h_start+3,hlim);
 
@@ -688,6 +714,9 @@ do_bilin_interp_general_all_HVX( struct nn_graph *nn, void *rstpv )
 			vacc += planp->vscale;
 			if( iypos >= hlim) {		// don't exceed hlim
 				iypos = hlim;
+				yfrac = 0;
+			} else if (iypos < 0) {		// don't go below 0, only happen with half_pixel_centers
+				iypos = 0;
 				yfrac = 0;
 			}else if( (int)(vacc>>32) == iypos){		// next is at same int. part
 				// can do two at once. @@@ (currently not actually doing this)
@@ -733,7 +762,7 @@ struct nn_node_ops nn_ops_for_QuantizedResizeBilinear_8_d32 = {
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common_release_opaque,
-	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_inputs = NN_IOCOUNT_RANGE(4,6),
 	.n_outputs = NN_IOCOUNT(3),
 	.flags = NN_NODE_FLAG_D32_INPUT | NN_NODE_FLAG_D32_OUTPUT,
 };

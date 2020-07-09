@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -134,7 +134,7 @@ set_addsub_scaling( struct nn_graph *nn, struct nn_node * self, struct addsub_16
 	float a_qstep = (tmp[1]-tmp[0]) * (float)(1./65536.);
 	float b_qstep = (tmp[3]-tmp[2]) * (float)(1./65536.);
 	float out_qstep = (tmp[5]-tmp[4]) * (float)(1./65536.);
-	int a_zero, b_zero, out_zero = 0x8000;
+	int a_zero=0, b_zero=0, out_zero = 0x8000;
 	if (is_u16 ){
 		a_zero = saturate_u16( (int)(-tmp[0]/a_qstep + 0.5f));
 		b_zero = saturate_u16( (int)(-tmp[2]/b_qstep + 0.5f));

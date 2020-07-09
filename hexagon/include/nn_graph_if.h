@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -44,6 +44,7 @@
 
 #include <nn_graph_types.h>
 #include <hexagon_nn.h>
+#include "serialize_graph.h"
 #include <stdint.h>
 #include <stdio.h>
 
@@ -78,23 +79,28 @@ struct perfinfo {
 
 struct initinfo {
 	int32_t priority;
+	int32_t cpuEarlyWakeup;
 };
 
+int hexagon_nn_get_num_nodes_in_graph(nn_id_t id, unsigned int *num_nodes);
+int hexagon_nn_disable_dcvs(void);
+int hexagon_nn_GetHexagonBinaryVersion(int* ver);
+int hexagon_nn_PrintLog(const unsigned char* buf, int bufLen);
+int hexagon_nn_init_with_info(hexagon_nn_nn_id* g, const struct initinfo* info);
+int hexagon_nn_populate_graph(nn_id_t id, const unsigned char* graph_data, int graph_dataLen);
 
 int hexagon_nn_get_dsp_offset(uint32_t *libhexagon_addr, uint32_t *fastrpc_shell_addr);
 int hexagon_nn_version(int *ver);
 int hexagon_nn_last_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
 int hexagon_nn_multi_execution_cycles(nn_id_t id, unsigned int *cycles_lo, unsigned int *cycles_hi);
 int hexagon_nn_init(hexagon_nn_nn_id *g);
-int hexagon_nn_config();
+int hexagon_nn_config(void);
 int hexagon_nn_get_power(int type);
 int hexagon_nn_snpprint(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_getlog(nn_id_t id, unsigned char *buf, uint32_t length);
 int hexagon_nn_set_debug_level(nn_id_t id, int level);
 int print_node_perf(nn_id_t id);
-int hexagon_nn_get_power(int type);
-int hexagon_nn_udo_register_lib(const char* so_path_name, hexagon_nn_udo_err* err);
-
+int hexagon_nn_register_udo_lib(const char* so_path_name, uint32_t* udo_lib_registration_id, hexagon_nn_udo_err* err);
 struct almost_a_tensor ;
 
 int hexagon_nn_config_with_options(
@@ -142,6 +148,21 @@ typedef struct {
         int extraInfoValidLen; //like data_valid_len in tensordef
 } hexagon_nn_execute_info;
 
+typedef struct {
+        union {
+                uint64_t deadline;
+                struct {
+                    uint32_t deadline_lo;
+                    uint32_t deadline_hi;
+                };
+        };
+} hexagon_nn_deadline_info;
+
+typedef struct {
+    uint32_t option_id;
+    unsigned char* option_ptr;
+    int option_ptrLen;
+} hexagon_nn_execute_option;
 
 /* 
  * Definition / I/O for a Tensor
@@ -208,6 +229,11 @@ int hexagon_nn_populate_const_node(
 	uint32_t data_len,
 	uint32_t target_offset);
 
+
+int hexagon_nn_serialize_size(nn_id_t id, uint32_t * serialized_obj_size_out, uint32_t *return_code);
+int hexagon_nn_serialize(nn_id_t id, uint8_t * buffer, int32_t buffer_size, uint32_t *return_code);
+int hexagon_nn_deserialize(const uint8_t * buffer, int32_t buffer_size, nn_id_t * new_graph_out, uint32_t *return_code);
+
 int hexagon_nn_prepare(nn_id_t id);
 int hexagon_nn_execute(nn_id_t id, 
 	uint32_t batches_in,
@@ -234,8 +260,16 @@ int hexagon_nn_execute_with_info(nn_id_t id,
 	hexagon_nn_tensordef *tensors_out,
 	uint32_t n_tensors_out, 
 	hexagon_nn_execute_info *execute_info);
+int hexagon_nn_execute_with_option(nn_id_t id,
+	const hexagon_nn_tensordef *tensors_in,
+	uint32_t n_tensors_in,
+	hexagon_nn_tensordef *tensors_out,
+	uint32_t n_tensors_out,
+	hexagon_nn_execute_info *execute_info,
+	const hexagon_nn_execute_option *options,
+	uint32_t n_options);
 int hexagon_nn_teardown(nn_id_t id);
-int hexagon_nn_free_udo_individual_lib (const char* package_name, hexagon_nn_udo_err* err);
+int hexagon_nn_free_udo_individual_lib (uint32_t udo_lib_registration_id, hexagon_nn_udo_err* err);
 int hexagon_nn_free_udo_libs (hexagon_nn_udo_err* err);
 int hexagon_nn_reset_perfinfo(nn_id_t id, uint32_t event);
 int hexagon_nn_get_perfinfo(nn_id_t id, 

@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -91,7 +91,7 @@ int adjust_minmax_for_zero( float *min_p, float *max_p )
 	float mn = *min_p;
 	float mx = *max_p;
 	float dif = mx-mn;
-	if( !(dif >= 1e-6f)) return -1;	// check valid min,max_p
+	if( !(dif >= 1e-6f)) return errlog(NULL, "invalid max_p and min_p ");	// check valid min,max_p
 	if( mn == 0.0f) return 0;		// common case
 	float z = (-255.0f)*mn / dif;		// current 'zero point'
 	float zi = floorf(z);
@@ -119,7 +119,7 @@ int adjust_minmax_for_zero_16b(float *min_p, float *max_p)
 	float mn = *min_p;
 	float mx = *max_p;
 	float dif = mx - mn;
-	if (!(dif >= 1e-6f)) return -1;	// check valid min,max_p
+	if (!(dif >= 1e-6f)) return errlog(NULL,"invalid min_p,max_p");	// check valid min,max_p
 	if (mn == 0.0f) return 0;		// common case
 	float z = (-65536.0f)*mn / dif;		// current 'zero point'
 	float zi = floorf(z);
@@ -151,7 +151,7 @@ int adjust_minmax_for_zero_with_constraints_16b( float *min_p, float *max_p , in
         float mn = *min_p;
         float mx = *max_p;
         float dif = mx-mn;
-        if( !(dif >= 1e-6f)) return -1; // check valid min,max_p
+        if( !(dif >= 1e-6f)) return errlog(NULL,"diff is too less between min_p and max_p"); // check valid min,max_p
         if( mn == 0.0f) return 0;               // common case
         float z = (-65536.f)*mn / dif;          // current 'zero point'
         float zi = floorf(z);
@@ -246,7 +246,7 @@ int adjust_minmax_for_zero_with_constraints( float *min_p, float *max_p , int co
 	float mn = *min_p;
 	float mx = *max_p;
 	float dif = mx-mn;
-	if(!(dif > 0.0f)) return -1;
+	if(!(dif > 0.0f)) return errlog(NULL," diff is too less between min_p and max_p");
 	if( mn == 0.0f) return 0;		// common case
 	float z = (-255.0f)*mn / dif;		// current 'zero point'
 	float zi = floorf(z);

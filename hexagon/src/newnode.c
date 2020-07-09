@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -110,12 +110,20 @@ int udo_common_execute (struct nn_node *node, struct nn_graph *nn) {
                 if (q_types[i] == SNPE_UDO_QUANTIZATION_TF || q_types[i] == SNPE_UDO_QUANTIZATION_NONE) {
                         uint32_t ele_size = ((node->output_defs)[hexnn_out_tensor_ind]).elementsize;
                         SnpeUdo_DataType_t out_data_type = SNPE_UDO_DATATYPE_FIXED_8;
+                        uint32_t tensor_type = NN_TYPE_VOID;
                         switch(ele_size) {
-                                case 1: out_data_type = SNPE_UDO_DATATYPE_FIXED_8; break;
-                                case 2: out_data_type = SNPE_UDO_DATATYPE_FIXED_16; break;
-                                case 4: out_data_type = SNPE_UDO_DATATYPE_FIXED_32; break;
+                                case 1: out_data_type = SNPE_UDO_DATATYPE_FIXED_8;
+                                        tensor_type = NN_TYPE_QUINT8;
+                                        break;
+                                case 2: out_data_type = SNPE_UDO_DATATYPE_FIXED_16;
+                                        tensor_type = NN_TYPE_QUINT16;
+                                        break;
+                                case 4: out_data_type = SNPE_UDO_DATATYPE_FIXED_32; 
+                                        tensor_type = NN_TYPE_FLOAT;
+                                        break;
                         }
                         (((SnpeUdo_TensorParam_t*)((node->udo_info).udo_output_tensors))[i]).dataType = out_data_type;
+                        (node->outputs)[hexnn_out_tensor_ind]->format.type = tensor_type;
                 }
                 if (q_types[i] == SNPE_UDO_QUANTIZATION_TF) {
                         (((((SnpeUdo_TensorParam_t*)((node->udo_info).udo_output_tensors))[i]).quantizeParams).TFParams).minValue = tensor_get_float((node->inputs)[hexnn_in_tensor_ind], 0);
@@ -593,7 +601,7 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                 return 0;
         }
         *unflattened_params = nn_malloc((*num_params)*sizeof(SnpeUdo_Param_t));
-        if (*unflattened_params == NULL)  return -1;
+        if (*unflattened_params == NULL)  return errlog(NULL," nn_malloc failed for unflattened_params ");
         dspStaticParamDescriptor_t* cur_desc;
         SnpeUdo_Param_t* cur_param;
         for(int i=0; i<(*num_params); i++) {
@@ -606,7 +614,7 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                         free_unflattened_udo_parameters(i, *unflattened_params);
                         nn_free(*unflattened_params);
                         *unflattened_params = NULL;
-                        return -1; // errlog
+                        return errlog(NULL, "unflatten_udo_parameters : sanity check failed"); // errlog
                 }
                 cur_param = (*unflattened_params)+i;
                 cur_param->paramType = cur_desc->paramType;
@@ -627,7 +635,7 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                                 free_unflattened_udo_parameters(i, *unflattened_params);
                                 nn_free(*unflattened_params);
                                 *unflattened_params = NULL;
-                                return -1; // errlog
+                                return errlog(NULL,"unflatten_udo_parameters : nn_malloc failed for cur_param->paramName"); // errlog
                         }
                         strncpy(cur_param->paramName, name_start, (cur_desc->name).lengthString+1);
                 }
@@ -647,7 +655,7 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                                         free_unflattened_udo_parameters(i, *unflattened_params);
                                         nn_free(*unflattened_params);
                                         *unflattened_params = NULL;
-                                        return -1; // errlog
+                                        return errlog(NULL, "unflatten_udo_parameters :  nn_malloc failed  for (cur_param->tensorParam).maxDimensions "); // errlog
                                 }
                                 (cur_param->tensorParam).currDimensions = nn_malloc(rank*sizeof(uint32_t));
                                 if ((cur_param->tensorParam).currDimensions == NULL) {
@@ -656,7 +664,7 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                                         free_unflattened_udo_parameters(i, *unflattened_params);
                                         nn_free(*unflattened_params);
                                         *unflattened_params = NULL;
-                                        return -1; // errlog
+                                        return errlog(NULL,"unflatten_udo_parameters : nn_malloc failed for (cur_param->tensorParam).currDimensions " ); // errlog
                                 }
                                 uint32_t* ds = &(dims_start->ds);
                                 for(int j=0; j<rank; j++) {
@@ -672,7 +680,7 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                                         free_unflattened_udo_parameters(i, *unflattened_params);
                                         nn_free(*unflattened_params);
                                         *unflattened_params = NULL;
-                                        return -1; // errlog
+                                        return errlog(NULL,"unflatten_udo_parameters : nn_malloc failed for (cur_param->tensorParam).tensorData " ); // errlog
                                 }
                                 memcpy((cur_param->tensorParam).tensorData, ((uint8_t*)data_start)+sizeof(tensorData_t), data_start->dataSize);
                         }
@@ -685,7 +693,7 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                                 free_unflattened_udo_parameters(i, *unflattened_params);
                                 nn_free(*unflattened_params);
                                 *unflattened_params = NULL;
-                                return -1; // errlog
+                                return errlog(NULL,"unflatten_udo_parameters : nn_malloc failed for cur_param->stringParam"); // errlog
                         }
                         strncpy(cur_param->stringParam, string_data_char_start, ((string_data_start->lengthString)+1));
                 }
@@ -694,13 +702,13 @@ int unflatten_udo_parameters(void* flattened, uint32_t size_flattened, uint32_t*
                 free_unflattened_udo_parameters(*num_params, *unflattened_params);
                 nn_free(*unflattened_params);
                 *unflattened_params = NULL;
-                return -1;   // errlog
+                return errlog(NULL, "unflatten_udo_parameters : sanity check for memory ");   // errlog
         }
         return 0;
 }
 
 int udo_append_to_list(struct nn_graph *nn, struct nn_node *node, struct udo_node* udo_n) {
-        if(udo_n == NULL)  return -1;
+        if(udo_n == NULL)  return errlog(nn,"wrong paramater for udo_n");
         udo_n->node = node;
         udo_n->next = NULL;
         if(nn->num_udos == 0) {

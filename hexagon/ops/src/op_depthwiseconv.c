@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -179,6 +179,7 @@ struct nn_node_ops nn_ops_for_QuantizedDepthwiseConv2d_8x8to32 = {
 	.dtor = node_free_common,
 	.n_inputs = NN_IOCOUNT(7),
 	.n_outputs = NN_IOCOUNT(3),
+	.flags = NN_NODE_FLAG_CLS_QDWCONV,
 };
 
 struct nn_node_ops nn_ops_for_QuantizedDepthwiseConv2d_8x8to32_ref = {

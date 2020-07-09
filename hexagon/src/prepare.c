@@ -54,6 +54,9 @@
 #include "expand_nodes.h"
 #include "nn_gentranspose.h"
 #include "udo_impl_dsp_hexnn_internal_v2.h"
+#include "expand_eqLSTM_qASR_nodes.h"
+#include <cast_utils.h>
+#include "prepare_matmul_16_weights.h"
 
 // int hexagon_nn_prepare(nn_id id);
 
@@ -245,7 +248,7 @@ get_zero_flat_qu8_const( struct nn_graph * nn, int depth , struct input inrefs[3
 {
 	// make an array...
 	if( depth < 1 || depth > (1<<19))
-		return -1;
+		return errlog(nn,"param depth = %d  is out of range",depth);
 	uint8_t * tptr;
 	int ok_for_var_array = (depth <= 4096);
 	uint8_t tmp_array[ ok_for_var_array ?  depth : 4];
@@ -255,18 +258,18 @@ get_zero_flat_qu8_const( struct nn_graph * nn, int depth , struct input inrefs[3
 	}else{
 		tptr = (uint8_t*)nn_calloc( 1, depth);
 		if( tptr== NULL)
-			return -1;
+			return errlog(nn, "nn_calloc failed for tptr");
 	}
 	uint32_t new_const_node_id = nn_graph_new_internal_node_id(nn);
 	int res = do_prepend_const_node( nn, new_const_node_id, 1,1,1, depth, tptr, depth );
 	if(!ok_for_var_array){
 		nn_free(tptr);
 	}
-	if( res != 0) return -1;
+	if( res != 0) return errlog(nn,"prepend const_node failed  res= %d ",res);
 
 	uint32_t min_node_id = get_zero_node(nn);
 	uint32_t max_node_id = create_const_float_op( nn, 1.0f);
-	if( min_node_id == 0 || max_node_id == 0 ) return -1;
+	if( min_node_id == 0 || max_node_id == 0 ) return errlog(nn," creation of zero_node or const_float_op failed ");
 	inrefs[0].src_id = new_const_node_id;
 	inrefs[0].output_idx = 0;
 	inrefs[1].src_id = min_node_id;
@@ -320,7 +323,7 @@ int const_depth_extend_8(struct nn_node *node, int amt, int val)
 	int new_size = b*w*h*(d+amt);
 	uint8_t *new_data;
 	uint8_t *dstdata;
-	if ((new_data = nn_malloc(new_size + 128)) == NULL) return -1;
+	if ((new_data = nn_malloc(new_size + 128)) == NULL) return errlog(NULL,"nn_calloc failed for new_data");
 	for (i = 0, dstdata=new_data; i < b*w*h; i++) {
 		memcpy(dstdata,srcdata,d);
 		dstdata += d;
@@ -348,7 +351,7 @@ int const_width_extend_8(struct nn_node *node, int amt, int val)
 	int new_size = b*(w+amt)*h*d;
 	uint8_t *new_data;
 	uint8_t *dstdata;
-	if ((new_data = nn_malloc(new_size + 128)) == NULL) return -1;
+	if ((new_data = nn_malloc(new_size + 128)) == NULL) return errlog(NULL, "nn_calloc failed for new_data");
 	for (i = 0, dstdata=new_data; i < b*h; i++) {
 		memcpy(dstdata,srcdata,w*d);
 		dstdata += w*d;
@@ -510,7 +513,6 @@ struct opcheck_manager
 	nn_sem_t * donesem;
 	int pending;
 };
-extern int Num_Vector_Threads;
 
 static void opcheck_wait(struct opcheck_manager* manager){
 	while( manager->pending > 0 ){
@@ -559,7 +561,7 @@ opcheck_add_to_q(struct nn_graph *nn,struct opcheck_manager* manager){
 	}
 	// if too many pending, wait.
 	// makes sure not too many threads accessing the vector context on v60
-	while( manager->pending >= Num_Vector_Threads ){
+	while( manager->pending >= nn->num_vector_threads ){
 		nn_sem_wait(manager->donesem );
 		manager->pending--;
 	}
@@ -590,7 +592,7 @@ static int __attribute__((unused)) run_op_check_queue(struct nn_graph *nn){
 
 // 'check' all of the ops in the graph.
 static int run_op_check(struct nn_graph *nn){
-	if(Num_Vector_Threads<2){
+	if(nn->num_vector_threads<2){
 		return run_op_check_serial(nn);
 	}else{
 		return run_op_check_queue(nn);
@@ -1086,7 +1088,7 @@ static int try_make_supernode_flavored(struct nn_graph *nn, struct nn_node **con
 	if( channel_scale_node== NULL && (operation == OP_Supernode_8x8p8to8 || operation == OP_Supernode_8x8p32to8)){
 		int res = maybe_morph_supernode_to_superfc( nn,
 				lastop->node_id , operation, conv_node->padding, n_in, new_inputs , new_outputs , &supernode);
-		if( res != 0) return -1;
+		if( res != 0) return errlog(nn, "error in maybe_morph_supernode_to_superfc() =%d ",res);
 		// supernode != NULL means it did the morphing.
 	}
 
@@ -1179,7 +1181,7 @@ maybe_morph_supernode_to_superfc( struct nn_graph *nn,
 	// upgrade u8 bias to int32 if needed.
 	if( supernode_op == OP_Supernode_8x8p8to8){
 		int res = convert_qu8_const_to_qint32( nn, &new_inputs[7], out_depth, out_depth);
-		if( res != 0) return -1;
+		if( res != 0) return errlog(nn," error in convert_qu8_const_to_qint32() = %d ",res);
 	}else if( supernode_op != OP_Supernode_8x8p32to8 ) {
 		logmsg(nn,0, "bad type!");
 		return -1;
@@ -1479,6 +1481,15 @@ static int make_optimize_axisshuffle (struct nn_graph *nn)
 	return graph_iterator(nn,try_optimize_axisshuffle);
 }
 
+static int fold_mul_qdown(struct nn_graph *nn){
+	return graph_iterator(nn, find_and_replace_mul_qdown_nodes);
+}
+
+static int replace_eqLSTM_qASR_nodes_in_graph(struct nn_graph *nn)
+{
+	return graph_iterator(nn, find_and_replace_eqLSTM_nodes);
+}
+
 static int try_pad_bad_supernodes(struct nn_graph *nn, struct nn_node **src_node_p)
 {
 	struct nn_node *src_node = *src_node_p;
@@ -1524,9 +1535,9 @@ static int try_pad_bad_supernodes(struct nn_graph *nn, struct nn_node **src_node
 		pad_amt,
 		depth_pad,
 		dst_filt_offset);
-	if (const_depth_extend_8(src_bias,pad_amt,0) != 0) return -1;
-	if (const_depth_extend_8(src_filts,pad_amt,0) != 0) return -1;
-	if (const_width_extend_8(dst_filts,pad_amt,dst_filt_offset) != 0) return -1;
+	if (const_depth_extend_8(src_bias,pad_amt,0) != 0) return errlog(nn, "  error in const_depth_extend_8()");
+	if (const_depth_extend_8(src_filts,pad_amt,0) != 0) return errlog(nn, " error in const_depth_extend_8()") ;
+	if (const_width_extend_8(dst_filts,pad_amt,dst_filt_offset) != 0) return errlog(nn, " error in const_depth_extend_8()");
 	src_node->outputs[0]->max_size = ((uint64_t)src_node->outputs[0]->max_size * depth_pad) / depth;
 	logmsg(nn,2,"Successfully prepadded supernodes %x and %x",src_node->node_id,dst_node->node_id);
 	return 0;
@@ -1667,7 +1678,9 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 	 case OP_QuantizedConcat_u16:           return OP_QuantizedConcat_u16_d32 | D32REPL_16;
 
 	 case OP_Convert_from_aix:              return OP_Convert_from_aix_d32;
+	 case OP_Convert_from_aix_16b:          return OP_Convert_from_aix_16b_d32 | D32REPL_16;
 	 case OP_Convert_to_aix_d32:            return OP_Convert_to_aix_d32_d32;
+	 case OP_Convert_to_aix_d32_16b:        return OP_Convert_to_aix_d32_16b_d32 | D32REPL_16;
 	 case OP_QuantizedSoftmax_8:
 	   {  // convert only if
 		  //    (1) input is a Convert_from_d32 (i.e. input already in d32)
@@ -1713,15 +1726,17 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 		if ((src1 = find_node(nn,srcnode->input_refs[1].src_id)) == NULL) return errlog(nn,"src1 not found");
 		int src0_idx = srcnode->input_refs[0].output_idx;
 		int src1_idx = srcnode->input_refs[1].output_idx;
+		int op_depth = srcnode->output_defs[src0_idx].max_sizes[3];
+		int no_broadcast = (check_dims_equal(&src0->output_defs[src0_idx],&src1->output_defs[src1_idx]) == 0);
 		// add_d32/sub_32: supports:
 		// - any case broadcasting from B and/or H only (detected as 00xx in lower 4 bits of bcode)
 		// - any case where B_shape = (1,1,*,*)  (broadcast on B and H, and optionally on W and/or D)
 		//		(detected as xx11 in upper 4 bits). For this case 'A'  can be size 1 on B and/or D.
 		// Also supports broadcasting from A onto B with the same restrictions.
 		//
-		// Convert only if input 0 or 1 is convert_from_d32 (i.e. input already in d32) and no broadcast
+		// Do not convert if neither input is convert_from_d32 (i.e. input already in d32) and no broadcast
 		if (    (!((src0->node_type == OP_Convert_from_d32) || (src1->node_type == OP_Convert_from_d32))) 
-			&& (check_dims_equal(&src0->output_defs[src0_idx],&src1->output_defs[src1_idx]) == 0)) {
+			&& no_broadcast) {
 #if 0
 			logmsg(nn,2,"src0.od[0]: %d,%d,%d,%d src1.od[0]: %d,%d,%d,%d",
 				src0->output_defs[src0_idx].max_sizes[0],
@@ -1734,6 +1749,11 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 				src1->output_defs[src1_idx].max_sizes[3]);
 			logmsg(nn,2,"add or sub: dims equal and non-d32");
 #endif
+			return -1;
+		}
+		// Also do not convert if depth is small, and one or more input is not d32, and no broadcast
+		if (op_depth <= 3 && !((src0->node_type == OP_Convert_from_d32) && (src1->node_type == OP_Convert_from_d32))
+			&& no_broadcast) {
 			return -1;
 		}
 
@@ -1865,12 +1885,36 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 	  {
 		int32_t output_depth = srcnode->output_defs[0].max_sizes[3];
 		int32_t output_width = srcnode->output_defs[0].max_sizes[2];
-		// if width is not a power of 2, it could not be accelerated in OP_QuantizedResizeBilinear_8
-		// it could run with OP_QuantizedResizeBilinear_8_d32 when width is not a power of 2
-		if ((output_depth > 2) || ((output_width&(output_width-1)) != 0))
-			return OP_QuantizedResizeBilinear_8_d32;
-		else
+		int32_t output_height = srcnode->output_defs[0].max_sizes[1];
+		struct nn_node * indata = find_node(nn,srcnode->input_refs[0].src_id);
+		if (indata == NULL) return errlog(nn, "Can't find src node of QuantizedResizeBilinear_8 op");
+		struct output const *indata_outp = &indata->output_defs[ srcnode->input_refs[0].output_idx ];
+		int32_t input_width = indata_outp->max_sizes[2];
+		int32_t input_height = indata_outp->max_sizes[1];
+		int32_t needs_opt_2x4x = ((output_height==input_height*2) && (output_width==input_width*2) && ((input_width&(input_width-1))==0)) ||
+							((output_height==input_height*4) && (output_width==input_width*4));
+		int32_t align_corners = 0;
+		if( srcnode->n_inputs >= 5 ) {
+			struct nn_node const* in4const = find_node_must_be_Const_from_ref(nn, &srcnode->input_refs[4]);
+			if( in4const )
+				align_corners = tensor_get_int32( in4const->outputs[0], 0 ) != 0;
+			else
+				align_corners = 0;
+		}
+		int32_t half_pixel_centers = 0;
+		if( srcnode->n_inputs >= 6 ) {
+			struct nn_node const* in5const = find_node_must_be_Const_from_ref(nn, &srcnode->input_refs[5]);
+			if( in5const )
+				half_pixel_centers = tensor_get_int32( in5const->outputs[0], 0 ) != 0;
+			else
+				half_pixel_centers = 0;
+		}
+		// for small depth, and scaling 2x or 4x, and without align_corners or half_pixel_centers,
+		// it could be accelerated in non-d32 op QuantizedResizeBilinear_8
+		if ((output_depth <= 2) && (needs_opt_2x4x) && (align_corners == 0) && (half_pixel_centers == 0))
 			return -1;
+		else
+			return OP_QuantizedResizeBilinear_8_d32;
 	  }
 	  case OP_BatchToSpaceND_8:
 		if( check_batchop_ok_for_d32(nn,srcnode) != 0 ) return -1;
@@ -1903,7 +1947,7 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
             break;
 	  }
 	  case OP_QuantizedMul_8x8to8:
-	  {
+	  {	
 	  	//From op_mul_d32 we have the following requirements
 	  	//Dimensions must match; except it's ok to disagree on batches or height, as long as B input has size 1
 	  	//Get the input nodes first
@@ -1923,6 +1967,10 @@ static int depth32_replacement_op(struct nn_graph * nn, struct nn_node * srcnode
 	  	return D32REPL_TWOIN | OP_QuantizedMul_8x8to8_d32;
 
 	  }
+
+
+    case OP_QuantizedHardSwish_8: return OP_QuantizedHardSwish_8_d32;
+   
 	/////////////////// 16-bit arith ops //////////////////////
 	 case OP_QuantizedAdd_u16:
 		return OP_QuantizedAdd_u16_d32 | D32REPL_TWOIN | D32REPL_16;
@@ -2158,7 +2206,7 @@ need_convert_to_d32(struct nn_graph *nn,
 	shape_from_outputdesc( &outsize, &producer->output_defs[current_inpref.output_idx]);
 	struct nn_node * new_node =  create_convert(nn,current_inpref.src_id,current_inpref.output_idx,&outsize,conv_to_op);
 
-	if( new_node == NULL) return -1;
+	if( new_node == NULL) return errlog(nn,"need_convert_to_d32() : new_node == NULL");
 	result_inpref->src_id = new_node->node_id;
 	result_inpref->output_idx = 0;
 	*result_nodep = new_node;
@@ -2307,10 +2355,10 @@ static int do_convert_concat_depth32(struct nn_graph *nn, struct nn_node **nodep
 	int i;
 	int src_id;
 	int src_oidx;
-
+	int retcode = 0;
 	// sanity test; protect from breaking the stack
 	if( node_ins < 4 || node_ins >(1+3*1024) || node_outs < 3 || node_outs > 1024+2){
-		return 0;
+		return retcode;
 	}
 	// actual # of tensors in and out (the number of conversions needed)
 
@@ -2318,97 +2366,115 @@ static int do_convert_concat_depth32(struct nn_graph *nn, struct nn_node **nodep
 	int n_outputs = node_outs -2;			// 1..1024
 
 	// some variable sized arrays ...
-	struct output new_outputs[node_outs];
-	struct input new_inputs[node_ins];
+	const int HEAP_NODES     = 3;
+	const int NODE_NEW_NODES = 0;
+	const int NODE_OUTPUTS   = 1;
+	const int NODE_INPUTS    = 2;
+	void* nodes_ptr[HEAP_NODES];
+
 	// pointers to all the new nodes, in order of execution:
 	// [0.. n_inputs-1]:  conv_to_d32 nodes
 	// [n_inputs]      :   new concat node
 	// [n_inputs+1 .. n_inputs+n_outputs]   : conv_from_d32 node
-	struct nn_node *new_nodes[n_inputs+1+n_outputs];
-	const struct nn_node ** new_from_d32_nodes = (const struct nn_node **)&new_nodes[n_inputs+1];
+	struct nn_node **new_nodes = nodes_ptr[NODE_NEW_NODES] = nn_malloc((n_inputs+1+n_outputs) * sizeof(struct nn_node));
+	struct output *new_outputs = nodes_ptr[NODE_OUTPUTS]   = nn_malloc(node_outs * sizeof(struct output));
+	struct input *new_inputs   = nodes_ptr[NODE_INPUTS]    = nn_malloc(node_ins  * sizeof(struct input));
 
-	if( node_ins != 3*n_inputs+1){
-		logmsg(nn,0,"%s node has %d inputs", hexagon_nn_op_names[srcnode->node_type], node_ins );
-		return 0;	// that's not right
-	}
-
-	logmsg(nn, 2, "Converting %s %p to %s", hexagon_nn_op_names[srcnode->node_type], srcnode, hexagon_nn_op_names[new_operation]);
-	if ((srcnode->output_defs[0].max_sizes[1] == 1) && (srcnode->output_defs[0].max_sizes[2] == 1)) {
-		logmsg(nn,2,"Don't try and convert 1x1xD tensors to D32 format");
-		return 0;
-	}
-	memcpy(new_inputs,srcnode->input_refs, node_ins*sizeof(new_inputs[0]));
-	memcpy(new_outputs, srcnode->output_defs, node_outs*sizeof(new_outputs[0]));
-
-	// d32 padding on output tensors
-	//for( int i = 0; i < n_outputs; i++)
-	//	output_add_d32_padding( &new_outputs[i]);
-
-	// create cvt->32 nodes for all of the inputs; modify the 'new_inputs' array
-	// to reflect those sources. Entries in new_nodes[] will be set to point to the
-	// new nodes, and to NULL when the nodes were not actually needed (i.e. we were wired
-	// to the input of an existing Convert_from_d32)
-	for (i = 0; i < n_inputs; i++) {
-		src_id = srcnode->input_refs[1+i].src_id;
-		src_oidx = srcnode->input_refs[1+i].output_idx;
-
-		int res = need_convert_to_d32( nn , srcnode,
-				new_inputs[1+i],	// old input ref
-				&new_inputs[1+i],		// input ref will be placed here
-				& new_nodes[i] );		// new node ptr placed here (or NULL if existing node used)
-		if( res != 0){
-			return errlog(nn,"Can't make new d32 node");
+	do {
+		if( new_outputs == NULL || new_inputs == NULL || new_nodes == NULL) {
+			retcode = errlog(nn,"Fail to allocate memory for new_outputs or new_inputs or new_nodes");
+			break;
 		}
-	}
-	// if a split node input #0 is wired to same place as #1, make sure we rewire the new one in the same way.
-	if( new_operation == OP_QuantizedSplit_8_d32 ){
-		struct input const *old_inputs = srcnode->input_refs;
-		if( old_inputs[0].src_id == old_inputs[1].src_id
-			&& old_inputs[0].output_idx == old_inputs[1].output_idx ){
-			new_inputs[0] = new_inputs[1];
+		const struct nn_node ** new_from_d32_nodes = (const struct nn_node **)&new_nodes[n_inputs+1];
+
+		if( node_ins != 3*n_inputs+1 && node_ins != 3*n_inputs+3){
+			logmsg(nn,0,"%s node has %d inputs", hexagon_nn_op_names[srcnode->node_type], node_ins );
+			break;	// that's not right
 		}
-	}
 
-	// Create the new operation that operates in d32-format
-	if ((new_d32node = optab[new_operation]->ctor(
-		nn,
-		srcnode->node_id,
-		new_operation,
-		srcnode->padding,
-		node_ins,
-		node_outs,
-		new_inputs,
-		new_outputs)) == NULL) {
-		return errlog(nn,"Can't make new d32 node");
-	}
-	// stash that in the list of new nodes
-	new_nodes[n_inputs] = new_d32node;
-
-	// Create the conversion(s) back from d32 format
-	for(i = 0; i < n_outputs; i++ ){
-		if ((convert_from_node = create_convert_from_d32( nn,
-			new_d32node->node_id,	// each connected to new node
-			i,		// each connected to a separate output
-			&srcnode->outputs[i]->shape,
-			elbytes  )) == NULL) {
-			return errlog(nn,"Can't make convert to d32");
+		logmsg(nn, 2, "Converting %s %p to %s", hexagon_nn_op_names[srcnode->node_type], srcnode, hexagon_nn_op_names[new_operation]);
+		if ((srcnode->output_defs[0].max_sizes[1] == 1) && (srcnode->output_defs[0].max_sizes[2] == 1)) {
+			logmsg(nn,2,"Don't try and convert 1x1xD tensors to D32 format");
+			break;
 		}
-		new_from_d32_nodes[i] = convert_from_node;
-	}
+		memcpy(new_inputs,srcnode->input_refs, node_ins*sizeof(new_inputs[0]));
+		memcpy(new_outputs, srcnode->output_defs, node_outs*sizeof(new_outputs[0]));
 
-	// move consumers of srcnode to read the convert_from_node
-	change_multi_output_refs( nn, srcnode,
-			srcnode->node_id,		// replace all refs to this node
-			n_outputs,				// .. with output index  in range 0..n_outputs-1
-			new_from_d32_nodes);	// to these nodes, output index 0.
+		// d32 padding on output tensors
+		//for( int i = 0; i < n_outputs; i++)
+		//	output_add_d32_padding( &new_outputs[i]);
 
-	//
-	// replace one node with the whole list
-	//
-	if( replace_node_with_sequence( nn, nodeptr,srcnode, new_nodes, n_inputs+1+n_outputs ) < 0){
-		return errlog(nn,"failed to replace nodes for %s",hexagon_nn_op_names[new_operation]);
-	}
-	return 0;
+		// create cvt->32 nodes for all of the inputs; modify the 'new_inputs' array
+		// to reflect those sources. Entries in new_nodes[] will be set to point to the
+		// new nodes, and to NULL when the nodes were not actually needed (i.e. we were wired
+		// to the input of an existing Convert_from_d32)
+		for (i = 0; i < n_inputs; i++) {
+			src_id = srcnode->input_refs[1+i].src_id;
+			src_oidx = srcnode->input_refs[1+i].output_idx;
+
+			int res = need_convert_to_d32( nn , srcnode,
+					new_inputs[1+i],	// old input ref
+					&new_inputs[1+i],		// input ref will be placed here
+					& new_nodes[i] );		// new node ptr placed here (or NULL if existing node used)
+			if( res != 0){
+				retcode = errlog(nn,"Can't make new d32 node");
+				break;
+			}
+		}
+		// if a split node input #0 is wired to same place as #1, make sure we rewire the new one in the same way.
+		if( new_operation == OP_QuantizedSplit_8_d32 ){
+			struct input const *old_inputs = srcnode->input_refs;
+			if( old_inputs[0].src_id == old_inputs[1].src_id
+				&& old_inputs[0].output_idx == old_inputs[1].output_idx ){
+				new_inputs[0] = new_inputs[1];
+			}
+		}
+
+		// Create the new operation that operates in d32-format
+		if ((new_d32node = optab[new_operation]->ctor(
+			nn,
+			srcnode->node_id,
+			new_operation,
+			srcnode->padding,
+			node_ins,
+			node_outs,
+			new_inputs,
+			new_outputs)) == NULL) {
+			retcode = errlog(nn,"Can't make new d32 node");
+			break;
+		}
+		// stash that in the list of new nodes
+		new_nodes[n_inputs] = new_d32node;
+
+		// Create the conversion(s) back from d32 format
+		for(i = 0; i < n_outputs; i++ ){
+			if ((convert_from_node = create_convert_from_d32( nn,
+				new_d32node->node_id,	// each connected to new node
+				i,		// each connected to a separate output
+				&srcnode->outputs[i]->shape,
+				elbytes  )) == NULL) {
+				retcode = errlog(nn,"Can't make convert to d32");
+				break;
+			}
+			new_from_d32_nodes[i] = convert_from_node;
+		}
+
+		// move consumers of srcnode to read the convert_from_node
+		change_multi_output_refs( nn, srcnode,
+				srcnode->node_id,		// replace all refs to this node
+				n_outputs,				// .. with output index  in range 0..n_outputs-1
+				new_from_d32_nodes);	// to these nodes, output index 0.
+
+		//
+		// replace one node with the whole list
+		//
+		if( replace_node_with_sequence( nn, nodeptr,srcnode, new_nodes, n_inputs+1+n_outputs ) < 0){
+			retcode = errlog(nn,"failed to replace nodes for %s",hexagon_nn_op_names[new_operation]);
+			break;
+		}
+	} while(0);
+	nn_free_array(nodes_ptr,sizeof(nodes_ptr)/sizeof(nodes_ptr[0]));
+	return retcode;
 }
 
 static int do_convert_to_short_conv(struct nn_graph *nn, struct nn_node **nodeptr)
@@ -2556,7 +2622,7 @@ static int do_convert_to_depth32(struct nn_graph *nn, struct nn_node **nodeptr)
 	new_operation &= ~D32REPL_FLAGS;
 
 	// some special cases...
-	if ( new_operation == OP_Convert_from_aix_d32)
+	if ( new_operation == OP_Convert_from_aix_d32 || new_operation == OP_Convert_from_aix_16b_d32)
 		convinput_set = 0;
 	else if( new_operation == OP_InputSupernode_8x8p8to8_outd32)
 		return do_convert_to_short_conv(nn,nodeptr);		// (also includes bias32 variant)
@@ -3239,7 +3305,7 @@ static int try_fold_scalar_mpy(struct nn_graph *nn, struct nn_node **requant_nod
 			if( newval != oldval){
 				if( check_all_outputs(nn,minmax_node,supernode)!=0){	// has other refs - make a new one.
 					uint32_t newnode = create_const_float_op(nn, newval );
-					if( newnode == 0) return -1;	// create failed (with errlog)
+					if( newnode == 0) return errlog(nn, "try_fold_scalar_mpy() : newnode == 0");	// create failed (with errlog)
 					supernode->input_refs[range_inputs[i]].src_id = newnode;
 					any_mods = 1;
 				}else{	 // just modify the existing const
@@ -3594,18 +3660,37 @@ static int do_remove_unnecessary_d32_converts(struct nn_graph *nn, struct nn_nod
 		logmsg(nn,2,"Removing convert from d32 located after convert to aix d32");
 		return change_refs(nn, node->node_id, 0, srcsrc_id,srcsrc_idx);
 	}
+	if (node_type == OP_Convert_from_d32_16b) {
+		src_id = node->input_refs[0].src_id;
+		if ((srcnode=find_node(nn,src_id)) == NULL) return errlog(nn,"src %d not found",src_id);
+		if (srcnode->node_type != OP_Convert_to_aix_d32_16b_d32) return 0;
+		srcsrc_id = node->input_refs[0].src_id;
+		srcsrc_idx = node->input_refs[0].output_idx;
+		logmsg(nn,2,"Removing convert from d32 16b located after convert to aix d32");
+		return change_refs(nn, node->node_id, 0, srcsrc_id,srcsrc_idx);
+	}
+
 	if (node_type != OP_Convert_to_d32 && node_type != OP_Convert_to_d32_16b) return 0;
 	src_id = node->input_refs[0].src_id;
 	if ((srcnode=find_node(nn,src_id)) == NULL) return errlog(nn,"src %d not found",src_id);
 
 	int src_node_type = srcnode->node_type;
 	if (node_type == OP_Convert_to_d32_16b){	// 16-bit case
-		if (src_node_type != OP_Convert_from_d32_16b ) {
+		if (src_node_type != OP_Convert_from_d32_16b && src_node_type != OP_Convert_from_aix_16b_d32) {
 			//logmsg(nn,0,"src node %x not from_32 for to_d32 node %x",srcnode->node_id,node->node_id);
 			return 0;
 		}
-		srcsrc_id = srcnode->input_refs[0].src_id;
-		srcsrc_idx = srcnode->input_refs[0].output_idx;
+		if (src_node_type == OP_Convert_from_d32_16b) {
+			srcsrc_id = srcnode->input_refs[0].src_id;
+			srcsrc_idx = srcnode->input_refs[0].output_idx;
+		}
+		else if (src_node_type == OP_Convert_from_aix_16b_d32) {
+			srcsrc_id = srcnode->node_id;
+			srcsrc_idx = node->input_refs[0].output_idx;
+		}
+		else {
+			return errlog(nn, "Shouldn't hit this code branch when trying to remove uneeded d32 conversion nodes");
+		}
 	}
 	else
 	{
@@ -3921,10 +4006,36 @@ static int do_remove_concats_with_placement(struct nn_graph *nn, struct nn_node 
 	float minval = 0.0f;
 	int node_ids[2] = { get_zero_node(nn), get_zero_node(nn) };
 	float tmpvals[2] = { 0.0f, 0.0f, };
+
 	for (i = 0; i < n_inputs; i++) {
 		if (update_range_minmax(nn,node->input_refs[1+i].src_id,tmpvals,node_ids)) return 0; // failed to find range nodes
 		minval = fminf(minval,tmpvals[0]);
 		maxval = fmaxf(maxval,tmpvals[1]);
+	}
+	if ((node->n_inputs - 1) % 3 != 0){ // we have been given a static min/max
+		int static_min_node_nid = node->input_refs[node->n_inputs - 2].src_id;
+		int static_max_node_nid = node->input_refs[node->n_inputs - 1].src_id;
+
+		struct nn_node *static_min_node = find_node_must_be_Const(nn,static_min_node_nid);
+		if(static_min_node == NULL) return 0;
+
+		struct nn_node *static_max_node = find_node_must_be_Const(nn,static_max_node_nid);
+		if(static_max_node == NULL) return 0;
+
+		float static_minval = tensor_get_float(static_min_node->outputs[0],0);
+		float static_maxval = tensor_get_float(static_max_node->outputs[0],0);
+
+		if(static_minval >= minval && static_maxval <= maxval){
+			node_ids[0] = static_min_node_nid;
+			node_ids[1] = static_max_node_nid;
+			minval = static_minval;
+			maxval = static_maxval;
+		}
+		else{
+			// fake concat will not work with a static min/max that's wider than
+			// the actual min/max.
+			return 0;
+		}
 	}
 	/* We can only do this optimization if the inputs have fixed, uniform ranges */
 	if (nn_isinf(maxval)) {
@@ -4065,6 +4176,36 @@ static int remove_concats_with_placement(struct nn_graph *nn)
 	return graph_iterator(nn,do_remove_concats_with_placement);
 }
 
+
+
+static int do_remove_concats_with_placement_deserialize(struct nn_graph *nn, struct nn_node **nodeptr)
+{
+    struct nn_node *node = *nodeptr;
+    if (node->node_type != OP_QuantizedFakeConcat_8_d32) return 0;
+    int n_inputs = (node->n_inputs - 1) / 3;
+    
+    
+    struct nn_node *first = find_first_producer(nn,node);
+    if (first == NULL) return errlog(nn,"Oops, couldn't find that producer?");
+    first->outputs[0]->max_size = node->outputs[0]->max_size;
+    /* Mark this and other contributing nodes' data pointers */
+    node->outputs[0]->data = first;
+    for (int i = 0; i < n_inputs; i++) {
+        struct nn_node *tmp = find_node(nn,node->input_refs[1+i].src_id);
+        if (tmp == NULL) return errlog(nn,"OOPS: can't find node now");
+        if (tmp == first) continue;
+        tmp->outputs[0]->data = first;
+    }
+    /* We can clean up those data pointers, pad values, etc at check() time. */
+    logmsg(nn,2,"got all the way here deserialize!");
+    return 0;
+}
+
+
+static int remove_concats_with_placement_deserialize(struct nn_graph *nn)
+{
+    return graph_iterator(nn,do_remove_concats_with_placement_deserialize);
+}
 
 
 /*
@@ -4494,6 +4635,52 @@ static inline int transpose_consts(struct nn_graph *nn) {
     return graph_iterator(nn, do_transpose_consts);
 }
 
+// Consumes the pattern Const->Quantized_CastInt8ToUInt8 and replaces it with a 
+// single pre-casted Const node
+static int propagate_const_unsigned_cast(struct nn_graph *nn, struct nn_node **cast_node_p)
+{
+    struct nn_node *cast_node = *cast_node_p;
+    if (cast_node->node_type != OP_Quantized_CastInt8ToUInt8) return 0;
+
+    uint32_t input_nid = cast_node->input_refs[0].src_id;
+    struct nn_node *input_node = find_node_must_be_Const(nn, input_nid);
+    if(input_node == NULL) return 0;
+
+    struct tensor *in_tensor = input_node->outputs[0];
+    struct shape in_shape = in_tensor->shape;
+    
+    uint32_t casted_const_nid = nn_graph_new_internal_node_id(nn);
+
+    const struct tensor *casted_in_tensor = do_prepend_const_node_ptr(nn, casted_const_nid, in_shape.batches, in_shape.height, in_shape.width, in_shape.depth, NULL, in_tensor->data_size*sizeof(uint8_t));
+    if (casted_in_tensor == NULL) {
+        errlog(nn, "propagate_const_unsigned_cast: Can't create a const node");
+        return 0;
+    }
+
+    nn_os_vector_workers_acquire(nn);
+    do_cast_operation(nn, in_tensor, casted_in_tensor);
+    nn_os_vector_workers_release(nn);
+
+    struct input new_input_refs[3] = {
+            (struct input) {casted_const_nid, 0},
+            cast_node->input_refs[1],
+            cast_node->input_refs[2],
+    };
+
+    int res = change_multi_output_refs_table(nn, cast_node, cast_node->node_id, 3, new_input_refs);
+    if(res == -1) return errlog(nn, "Pre-cast consts: Failed to change output refs!");
+
+    // Remove the cast op from the linked list
+    replace_node_with_sequence(nn, cast_node_p, cast_node, NULL, 0);
+
+    logmsg(nn, 2, "Pre-cast const node %x", input_nid);
+
+    return 0;
+}
+
+static inline int consts_unsigned_cast(struct nn_graph *nn) {
+    return graph_iterator(nn, propagate_const_unsigned_cast);
+}
 //
 // for node 'nodep', find all of the nodes reference by its inputs
 // and add 'delta' to all the refcounts.
@@ -4565,19 +4752,18 @@ static int remove_dead_nodes(struct nn_graph *nn)
 	return 0;
 }
 #endif
-
-#if 0
 static void move_nonconst_head_ptr(struct nn_graph *nn)
 {
-	struct nn_node *tmp;
-	do {
-		tmp = *nn->nonconst_head_ptr;
-		if (tmp == NULL) break;
-		if (tmp->node_type != OP_Const) break;
-		tmp = tmp->next;
-	} while (1);
+    struct nn_node *tmp = *nn->nonconst_head_ptr;
+    do {
+        if (tmp == NULL) break;
+        if (tmp->node_type != OP_Const) break;
+        if (tmp == *nn->nonconst_head_ptr) {
+            nn->nonconst_head_ptr = &tmp->next;
+        }
+        tmp = tmp->next;
+    } while (1);
 }
-#endif
 
 static int do_gather_const_node(struct nn_graph *nn, struct nn_node **nodeptr)
 {
@@ -4655,7 +4841,7 @@ static int init_hashtable( struct nn_graph *nn)
 		flags_or |= p->ops->flags;
 		struct nn_node * px = insert_node_to_hash(nn, p);
 		if( px != p){
-			if( px == NULL) return -1;
+			if( px == NULL) return errlog(nn,"init_hashtable() : px == NULL");
 			if( px->node_type == OP_Const && p->node_type == OP_Const){
 				logmsg(nn,1,"Const node using id %X ignored; was also used for previous Const", (unsigned)p->node_id);
 				const_node_dups++;
@@ -4832,6 +5018,348 @@ static int udo_add_depth32_converts(struct nn_graph *nn) {
         return 0;
 }
 
+static int try_zero_weights_for_small_channelscale(struct nn_graph *nn,
+                                                   struct nn_node** supernode) {
+    const struct nn_node *nodep = *supernode;
+    if (nodep->n_inputs != 13){
+        return 0;
+    }
+
+    uint32_t node_type = nodep->node_type;
+    bool is_depthwise;
+    switch (node_type) {
+        case OP_Supernode_8x8p8to8:
+        case OP_Supernode_8x8p8to8_d32:
+        case OP_InputSupernode_8x8p8to8_outd32:
+        case OP_Supernode_8x8p32to8:
+        case OP_Supernode_8x8p32to8_d32:
+        case OP_InputSupernode_8x8p32to8_outd32:
+        case OP_Supernode3322_8x8p8to8:
+        case OP_Supernode3322_8x8p32to8:
+        case OP_Supernode_8x8p32to8_ref:
+            is_depthwise = false;
+            break;
+        case OP_DepthwiseSupernode_8x8p8to8:
+        case OP_DepthwiseSupernode_8x8p8to8_d32:
+        case OP_DepthwiseSupernode_8x8p32to8:
+        case OP_DepthwiseSupernode_8x8p32to8_d32:
+            is_depthwise = true;
+            break;
+        default:
+            return 0;
+    }
+
+    // Get the channel scale data
+    const struct nn_node* channel_scales_node = find_node_must_be_Const(nn, nodep->input_refs[12].src_id);
+    if (!channel_scales_node) {
+        return errlog(nn, "Unable to get channel scales node");
+    }
+    const float *channel_scale_data = NULL;
+    const struct tensor *channel_scales_tensor = channel_scales_node->outputs[0];
+    const uint32_t num_channel_scales = channel_scales_tensor->data_size / sizeof(float);
+    if (num_channel_scales == 1 && tensor_get_float(channel_scales_tensor, 0) == 1.0f) {
+        return 0; // we don't really have channel-scaling; ignore a 1.0 input
+    }
+    else {
+       channel_scale_data = (float const*) channel_scales_tensor->data;
+    }
+
+    // get weights
+    struct nn_node* weights_node = find_node_must_be_Const(nn, nodep->input_refs[1].src_id);
+    if (!weights_node) {
+        return errlog(nn, "Unable to get weights node");
+    }
+    const uint32_t weights_height = weights_node->outputs[0]->shape.filt_height;
+    const uint32_t weights_width = weights_node->outputs[0]->shape.filt_width;
+    const uint32_t weights_depth = weights_node->outputs[0]->shape.filt_depth;
+    const uint32_t weights_batches = weights_node->outputs[0]->shape.filt_batches;
+    const uint32_t weights_max_size = weights_node->outputs[0]->max_size;
+    const uint32_t channel_scales_axis_size = (is_depthwise) ? weights_depth : weights_batches;
+    const uint32_t height_increment = weights_width * weights_depth * weights_batches;
+    const uint32_t width_increment = weights_depth * weights_batches;
+    const uint8_t* weights_data = weights_node->outputs[0]->data;
+
+    if (num_channel_scales != channel_scales_axis_size) {
+        return errlog(nn, "Number of channel scales %d does not match filter out depth: %d",
+                      num_channel_scales, channel_scales_axis_size);
+    }
+
+    // duplicate the weight node
+    uint8_t* new_weights_data = (uint8_t*)nn_calloc(weights_max_size, sizeof(uint8_t));
+    nn_os_vector_workers_acquire(nn);
+    struct nn_memcpy_manager  mcman;
+    nn_mcmanager_init(nn, &mcman);
+    nn_mcmanager_vmemcpy(nn, &mcman, new_weights_data, weights_data, weights_max_size );
+    nn_mcmanager_wait(nn, &mcman);
+    nn_os_vector_workers_release(nn);
+
+    // loop through and see if any small channel scales and set to zero
+    bool replace_weights_node = false;
+    for (uint32_t i = 0; i < weights_height; i++) {
+        uint32_t height_index = i * height_increment;
+
+        for (uint32_t j = 0; j < weights_width; j++) {
+            uint32_t width_index = j * width_increment;
+
+            for (uint32_t c = 0; c < num_channel_scales; c++) {
+                if (channel_scale_data[c] < 1. / 2048.) {
+                    if (is_depthwise) {
+                        uint32_t index = height_index + width_index + c * (weights_batches);
+                        memset(new_weights_data + index, 0, weights_batches);
+                    }
+                    else {
+                        for (uint32_t k = 0; k < weights_depth; k++) {
+                            uint32_t index = height_index + width_index + k * (weights_batches) + c;
+                            memset(new_weights_data + index, 0, 1);
+                        }
+                    }
+
+                    replace_weights_node = true;
+                }
+            }
+        }
+    }
+
+    if (replace_weights_node) {
+        const uint32_t new_weights_const_node_id = nn_graph_new_internal_node_id(nn);
+        if (do_prepend_const_node(nn, new_weights_const_node_id, weights_height, weights_width,
+                                  weights_depth, weights_batches, new_weights_data,
+                                  weights_max_size) != 0) {
+            nn_free(new_weights_data);
+            return errlog(nn,"Could not prepend the const node.");
+        }
+
+        nodep->input_refs[1].src_id = new_weights_const_node_id;
+        nodep->input_refs[1].output_idx = 0;
+    }
+
+    nn_free(new_weights_data);
+    return 0;
+}
+
+static int make_zero_weights_for_small_channelscale(struct nn_graph *nn)
+{
+    return graph_iterator(nn, try_zero_weights_for_small_channelscale);
+}
+
+// Looks for concat ops with output min/max and inserts requantize ops for each input tensor.
+static int do_add_requantize_for_concat(struct nn_graph *nn, struct nn_node **concat_node_p)
+{
+    struct nn_node *concat_node = *concat_node_p;
+
+    if(concat_node->node_type != OP_QuantizedConcat_8 && concat_node->node_type != OP_QuantizedConcat_8_d32) {
+		return 0;
+    }
+
+	if(concat_node->n_inputs % 3 != 0){
+		return 0;
+	}
+
+	struct nn_node *prev;
+	for (prev = nn->head; prev != NULL; prev = prev->next) {
+		if (prev->next->node_id == concat_node->node_id) break;
+	}
+
+	uint32_t output_min_nid = concat_node->input_refs[concat_node->n_inputs-2].src_id;
+	struct nn_node *output_min_node = find_node(nn, output_min_nid);
+	if(output_min_node == NULL) return errlog(nn, "Add requantize for concat: Concat node %x has null output min!", concat_node->node_id);
+	uint32_t output_min_oidx = concat_node->input_refs[concat_node->n_inputs-2].output_idx;
+	float output_min = output_min_node->node_type == OP_Const ? tensor_get_float( output_min_node->outputs[0],0) : -INFINITY;
+
+	uint32_t output_max_nid = concat_node->input_refs[concat_node->n_inputs-1].src_id;
+	struct nn_node *output_max_node = find_node(nn, output_max_nid);
+	if(output_max_node == NULL) return errlog(nn, "Add requantize for concat: Concat node %x has null output max!", concat_node->node_id);
+	uint32_t output_max_oidx = concat_node->input_refs[concat_node->n_inputs-1].output_idx;
+	float output_max = output_max_node->node_type == OP_Const ? tensor_get_float( output_max_node->outputs[0],0) : INFINITY;
+
+	uint32_t n_inputs = (concat_node->n_inputs - 3)/3;
+
+	for(int i = 0; i < n_inputs; i++){
+		uint32_t input_nid = concat_node->input_refs[i+1].src_id;
+		struct nn_node *input_node = find_node(nn, input_nid);
+		if(input_node == NULL) return errlog(nn, "Add requantize for concat: Concat node %x has null input!", concat_node->node_id);
+		uint32_t input_oidx = concat_node->input_refs[i+1].output_idx;
+
+		uint32_t input_min_nid = concat_node->input_refs[n_inputs+i+1].src_id;
+		struct nn_node *input_min_node = find_node(nn, input_min_nid);
+		if(input_min_node == NULL) return errlog(nn, "Add requantize for concat: Concat node %x has null input min!", concat_node->node_id);
+		uint32_t input_min_oidx = concat_node->input_refs[n_inputs+i+1].output_idx;
+		float input_min = input_min_node->node_type == OP_Const ? tensor_get_float(input_min_node->outputs[0],0) : -INFINITY;
+
+		uint32_t input_max_nid = concat_node->input_refs[2*n_inputs+i+1].src_id;
+		struct nn_node *input_max_node = find_node(nn, input_max_nid);
+		if(input_max_node == NULL) return errlog(nn, "Add requantize for concat: Concat node %x has null input max!", concat_node->node_id);
+		uint32_t input_max_oidx = concat_node->input_refs[2*n_inputs+i+1].output_idx;
+		float input_max = input_max_node->node_type == OP_Const ? tensor_get_float(input_max_node->outputs[0],0) : INFINITY;
+
+		if(input_min_nid == output_min_nid && input_min_oidx == output_min_oidx
+			&& input_max_nid == output_max_nid && input_max_oidx == output_max_oidx)
+			continue;
+
+		if(input_min != -INFINITY && input_min == output_min
+			&& input_max != INFINITY && input_max == output_max)
+			continue;
+
+		struct nn_node *requant_node;
+		uint32_t requant_node_id = nn_graph_new_internal_node_id(nn);
+
+		uint32_t operation = OP_Requantize_8to8;
+		if(concat_node->node_type == OP_QuantizedConcat_8_d32) operation = OP_Requantize_8to8_d32;
+
+		struct input requant_inputs[5];
+		requant_inputs[0].src_id     = input_nid;
+		requant_inputs[0].output_idx = input_oidx;
+		requant_inputs[1].src_id     = input_min_nid;
+		requant_inputs[1].output_idx = input_min_oidx;
+		requant_inputs[2].src_id     = input_max_nid;
+		requant_inputs[2].output_idx = input_max_oidx;
+		requant_inputs[3].src_id     = output_min_nid;
+		requant_inputs[3].output_idx = output_min_oidx;
+		requant_inputs[4].src_id     = output_max_nid;
+		requant_inputs[4].output_idx = output_max_oidx;
+
+		struct output requant_outputs[3];
+		requant_outputs[0] = input_node->output_defs[input_oidx];
+		requant_outputs[1] = Output_ScalarFloat;
+		requant_outputs[2] = Output_ScalarFloat;
+
+		logmsg(nn,4,"creating requant op %x",requant_node_id);
+		requant_node = optab[operation]->ctor(nn,requant_node_id,operation,NN_PAD_NA,5,3,&requant_inputs[0],&requant_outputs[0]);
+
+		concat_node->input_refs[i+1].src_id 				= requant_node_id;
+		concat_node->input_refs[i+1].output_idx 			= 0;
+		concat_node->input_refs[n_inputs+i+1].src_id 		= output_min_nid;
+		concat_node->input_refs[n_inputs+i+1].output_idx 	= output_min_oidx;
+		concat_node->input_refs[2*n_inputs+i+1].src_id 		= output_max_nid;
+		concat_node->input_refs[2*n_inputs+i+1].output_idx 	= output_max_oidx;
+
+		node_rehash_inputrefs(concat_node);
+
+		requant_node->next = prev->next;
+		prev->next = requant_node;
+		insert_node_to_hash(nn,requant_node);
+		nn->node_count++;
+	}
+
+    return 0;
+}
+
+static inline int add_requantize_for_concat(struct nn_graph *nn) {
+    return graph_iterator(nn, do_add_requantize_for_concat);
+}
+
+/**
+ * For convs with no bias add following, insert a fake
+ * bias add node with zeros in order to allow supernodes
+ * to be created.
+ */
+static int try_add_fake_bias_nodes(struct nn_graph *nn, struct nn_node **conv_node_p) {
+    struct nn_node* conv_node = *conv_node_p;
+
+    if (conv_node->node_type != OP_QuantizedConv2d_8x8to32 &&
+        conv_node->node_type != OP_QuantizedDepthwiseConv2d_8x8to32) {
+        return 0;
+    }
+
+    // We only want to add fake bias when we have following pattern:
+    // conv -> QuantizeDownAndShrinkRange_32to8/Requantize_32to8 ->
+    // any op except OP_QuantizedBiasAdd_8p8to32
+    const int possible_next_nodes[] = {OP_QuantizeDownAndShrinkRange_32to8,
+                                       OP_Requantize_32to8};
+    struct nn_node* next_node = find_unique_consumer(nn, conv_node, 2, possible_next_nodes, 0);
+    if (next_node == NULL || find_unique_consumer_mustbe(nn, next_node,
+                                                         OP_QuantizedBiasAdd_8p8to32, 0) != NULL) {
+        return 0;
+    }
+
+    // Make sure depthwise conv will become supernode before
+    // inserting a fake bias node after
+    if (conv_node->node_type == OP_QuantizedDepthwiseConv2d_8x8to32 &&
+        dwconv_extrachecks(nn, conv_node) != 0) {
+        return 0;
+    }
+
+    // Add zeros bias data
+    const uint32_t bias_data_size = conv_node->outputs[0]->shape.depth;
+    const uint32_t bias_data_const_node_id = nn_graph_new_internal_node_id(nn);
+    struct tensor const* bias_tensor = do_prepend_const_node_ptr(nn, bias_data_const_node_id, 1, 1,
+                                                                 1, bias_data_size, NULL,
+                                                                 bias_data_size * sizeof(int32_t));
+    if (bias_tensor == NULL) {
+        return errlog(nn, "Could not prepend bias data const node.");
+    }
+    memset(bias_tensor->data, 0, bias_data_size * sizeof(int32_t));
+
+    // Bias min
+    const float bias_min = 0;
+    const uint32_t bias_min_const_node_id = nn_graph_new_internal_node_id(nn);
+    if (do_prepend_const_node(nn, bias_min_const_node_id, 1, 1, 1, 1, (const uint8_t*)&bias_min,
+                              sizeof(float)) != 0) {
+        return errlog(nn, "Could not prepend bias min const node.");
+    }
+
+    // Bias max
+    const float bias_max = 0;
+    const uint32_t bias_max_const_node_id = nn_graph_new_internal_node_id(nn);
+    if (do_prepend_const_node(nn, bias_max_const_node_id, 1, 1, 1, 1, (const uint8_t*)&bias_max,
+                              sizeof(float)) != 0) {
+        return errlog(nn, "Could not prepend bias max const node.");
+    }
+
+    // Fake Bias node
+    const uint32_t num_inputs = 6;
+    struct input biasadd_inputs[num_inputs];
+    biasadd_inputs[0].src_id     = conv_node->node_id;
+    biasadd_inputs[0].output_idx = 0;
+    biasadd_inputs[1].src_id     = bias_data_const_node_id;
+    biasadd_inputs[1].output_idx = 0;
+    biasadd_inputs[2].src_id     = conv_node->node_id;
+    biasadd_inputs[2].output_idx = 1;
+    biasadd_inputs[3].src_id     = conv_node->node_id;
+    biasadd_inputs[3].output_idx = 2;
+    biasadd_inputs[4].src_id     = bias_min_const_node_id;
+    biasadd_inputs[4].output_idx = 0;
+    biasadd_inputs[5].src_id     = bias_max_const_node_id;
+    biasadd_inputs[5].output_idx = 0;
+
+    const uint32_t num_outputs = 3;
+    struct output biasadd_outputs[num_outputs];
+    biasadd_outputs[0] = conv_node->output_defs[0];
+    biasadd_outputs[1] = conv_node->output_defs[1];
+    biasadd_outputs[2] = conv_node->output_defs[2];
+
+    const int operation = OP_QuantizedBiasAdd_32p32to32;
+    const uint32_t bias_node_id = nn_graph_new_internal_node_id(nn);
+    struct nn_node* bias_node = NULL;
+    if ((bias_node = optab[operation]->ctor(
+        nn,
+        bias_node_id,
+        operation,
+        NN_PAD_NA,
+        num_inputs,
+        num_outputs,
+        biasadd_inputs,
+        biasadd_outputs)) == NULL) return errlog(nn, "Fake bias add ctor failure");
+
+    // Hookup bias into graph between conv and conv->next
+    if (insert_nodes(nn, &(conv_node->next), bias_node) != 1) {
+        return errlog(nn, "Unable to insert bias node into graph");
+    }
+
+    if (change_output_refs(nn, bias_node->next, conv_node->node_id, bias_node_id, 0x321) < 1) {
+        return errlog(nn, "Unable to change refs to bias add node");
+    }
+
+    return 0;
+}
+
+static inline int make_add_fake_bias_nodes(struct nn_graph *nn) {
+    return graph_iterator(nn, try_add_fake_bias_nodes);
+}
+
+static int try_prepare_matmul_16_weights(struct nn_graph *nn){
+	return graph_iterator(nn, find_and_prepare_matmul_16_weights);
+}
 
 //#define CHECK_PERFORMANCE_PREPARE 1
 
@@ -4870,7 +5398,12 @@ static int optimize(struct nn_graph *nn)
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_QUANTIZE)!=0){			// any Quantize?
 		if ((err = make_autoquantize(nn)) != 0) return err;
 	}
-    if((err = transpose_consts(nn)) != 0) return err;        // replace const->transpose pattern with transposed const
+	if( (nn->op_class_set & NN_NODE_FLAG_CLS_TRANSPOSE)!=0){
+    	if((err = transpose_consts(nn)) != 0) return err;        // replace const->transpose pattern with transposed const
+	}
+	if ((nn->op_class_set & NN_NODE_FLAG_CLS_QUANTIZEDCAST)!=0){
+        if((err = consts_unsigned_cast(nn)) != 0) return err;        // replace const->Quantized_CastInt8ToUInt8 pattern with casted const
+    }
 	PREPARE_TIME()
 	if ( (nn->op_class_set & NN_NODE_FLAG_CLS_TRANSPOSECONV)!=0){
         if ((err = create_transpose_conv_nodes(nn)) != 0) return err;
@@ -4887,17 +5420,30 @@ static int optimize(struct nn_graph *nn)
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_DWCONVF)!= 0){			// any DepthwiseConv2d_f ?
 		if ((err = make_quantized_dwise(nn)) != 0) return err;
 	}
-	if ((err = convert_insane_dwise(nn)) != 0) return err;			// Convert QuantizedDepthwiseConv to regular Conv for some cases
+	if((nn->op_class_set & NN_NODE_FLAG_CLS_QDWCONV)!=0){
+		if ((err = convert_insane_dwise(nn)) != 0) return err;			// Convert QuantizedDepthwiseConv to regular Conv for some cases
+	}
 	PREPARE_TIME()
 	if ((err = remove_unnecessary_quants(nn)) != 0) return err;
 	PREPARE_TIME()
-	if ((err = make_optimize_axisshuffle(nn)) != 0) return err;
-
-	if ((err = remove_unnecessary_dequant_quants(nn)) != 0) return err;
-	if ((err = remove_unnecessary_requants(nn)) != 0) return err;
+	if((nn->op_class_set & NN_NODE_FLAG_CLS_AXISSHUFF8)!=0){
+		if ((err = make_optimize_axisshuffle(nn)) != 0) return err;
+	}
+	if((nn->op_class_set & NN_NODE_FLAG_CLS_QUANTIZE)!=0){
+		if ((err = remove_unnecessary_dequant_quants(nn)) != 0) return err;
+	}
+	if ((nn->op_class_set & NN_NODE_FLAG_CLS_REQUANT8)!=0){
+		if ((err = remove_unnecessary_requants(nn)) != 0) return err;
+	}
 	PREPARE_TIME()
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_CHANSHUFFLE)!= 0){			// any QuantizedChannelShuffle_8 ?
 		if ((err = combine_chanshuffle(nn)) != 0) return err;
+	}
+	if ((nn->op_class_set & NN_NODE_FLAG_CLS_EQLSTM)!=0){ // any eqLSTM ops?
+		if((err = replace_eqLSTM_qASR_nodes_in_graph(nn))!=0) return err;
+	}
+	if((nn->op_class_set & NN_NODE_FLAG_CLS_MATMUL_16) != 0){
+		if((err = try_prepare_matmul_16_weights(nn))!=0) return err;
 	}
 	CHECK(GRAPHCHECK_HASH)
 	if ((err = remove_dead_nodes(nn)) != 0) return err;
@@ -4905,6 +5451,8 @@ static int optimize(struct nn_graph *nn)
 	if ((err = make_reluX_nodes(nn)) != 0) return err;
 	PREPARE_TIME();
 	if ((err = mark_biasadd_nodes(nn)) != 0) return err;
+	PREPARE_TIME();
+	if ((err = make_add_fake_bias_nodes(nn)) != 0) return err;
 	PREPARE_TIME();
 	if ((err = gather_const_nodes(nn)) != 0) return err;
 	PREPARE_TIME();
@@ -4921,6 +5469,9 @@ static int optimize(struct nn_graph *nn)
 	PREPARE_TIME();
 	if(0) if ((err = pad_bad_supernodes(nn)) != 0) return err;
 	if ((err = move_relus(nn)) != 0) return err;
+	if( (nn->op_class_set & NN_NODE_FLAG_CLS_QUANTMUL8TO32)!=0){
+		if((err = fold_mul_qdown(nn)) != 0) return err; // fold remaining QuantizedMul_8x8to32
+	}
 	if( ! nn_option_get(nn,test_no_d32conv))
 		if ((err = convert_to_depth32(nn)) != 0) return err;
 	PREPARE_TIME();
@@ -4933,12 +5484,15 @@ static int optimize(struct nn_graph *nn)
 	// or we will end up with stale D32 converts also showing as consumers.
 	if ((err = remove_dead_nodes(nn)) != 0) return err;
 	if (1) if ((err = remove_concats_with_placement(nn)) != 0) return err;
+	if ((err = add_requantize_for_concat(nn)) != 0) return err;
 	if ((err = remove_dead_nodes(nn)) != 0) return err;
 	PREPARE_TIME();
 	if ((err = gather_const_nodes(nn)) != 0) return err;
 	PREPARE_TIME();
 	if ((err = print_const_nodes(nn)) != 0) return err;
 	CHECK(GRAPHCHECK_DEADNODES|GRAPHCHECK_HASH|GRAPHCHECK_NONCONST)
+	if((err = make_zero_weights_for_small_channelscale(nn)) != 0) return err;
+	PREPARE_TIME();
 
 #ifdef CHECK_PERFORMANCE_PREPARE
 	logmsg(nn,0,"optimize %d->%d nodes; cycle times:",nodecount0, (int)nn->node_count);
@@ -5157,16 +5711,21 @@ static int udo_create_operations (struct nn_graph *nn)
 }
 
 
-static int do_prepare_inner(struct nn_graph *nn)
+static int do_prepare_inner(struct nn_graph *nn, int deserialize_flag)
 {
 	int err;
-	nn_mutex_lock(&graph_mutex);
 	nn_os_hvx_power_on(nn); // MUST BE AFTER THE LOCK MUTEX
 	if (nn->state != NN_GRAPH_CONSTRUCTION) {
 		return errlog(nn,"prepare: Graph not under construction");
 	}
 	//if ((err = run_op_setup(nn)) != 0) return err; /* FIXME: needed? Or just call ctor? */
-	if ((err = optimize(nn)) != 0) return err;
+	if (deserialize_flag) {
+        if ((err = remove_concats_with_placement_deserialize(nn)) != 0) return err;
+        nn->nonconst_head_ptr = &nn->head;
+        move_nonconst_head_ptr(nn);
+	} else {
+        if ((err = optimize(nn)) != 0) return err;
+	}
 	// prep for graph looping must be done after gather_const_nodes
 	// and before prepare_inputs
 	if( (nn->op_class_set & NN_NODE_FLAG_CLS_LOOP_CONTROL_NODE)!=0){
@@ -5180,9 +5739,8 @@ static int do_prepare_inner(struct nn_graph *nn)
 	if ((err = allocate_graph_storage(nn)) != 0) return err;
 	if ((err = run_op_check(nn)) != 0) return err;
 	if ((err = note_predecessors(nn)) != 0) return err;
-        if ((err = udo_create_operations(nn)) != 0) return err;
+    if (!deserialize_flag && (err = udo_create_operations(nn)) != 0) return err;
 	nn_os_hvx_power_off(nn); // MUST BE BEFORE THE UNLOCK MUTEX
-	nn_mutex_unlock(&graph_mutex);
 	nn->state = NN_GRAPH_PREPARED;
 #ifdef SHOWY_DEBUG
 	graphviz_print_graph(nn);
@@ -5196,14 +5754,15 @@ static int do_prepare_inner(struct nn_graph *nn)
 }
 
 
-int do_prepare(struct nn_graph *nn)
+int do_prepare(struct nn_graph *nn, int deserialize_flag)
 {
 	struct nn_prepare_state prepstate;
 	memset( &prepstate, 0, sizeof(prepstate));
 	nn->pstate = &prepstate;
-	int res = do_prepare_inner(nn);
+	nn_mutex_lock(&graph_mutex);
+	int res = do_prepare_inner(nn, deserialize_flag);
+	nn_mutex_unlock(&graph_mutex);
 	nn->pstate = NULL;
 	return res;
 }
-
 

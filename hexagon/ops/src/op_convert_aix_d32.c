@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -61,6 +61,7 @@ struct tdata
     int out_width;
     int in_depth;
     int out_depth;
+    int element_size;
 };
 
 static void convert_to_aix_d32_work(struct nn_graph *nn, void *vtd)
@@ -75,24 +76,29 @@ static void convert_to_aix_d32_work(struct nn_graph *nn, void *vtd)
     const int in_nd32 = out_depth / depth_padding;
     const struct tensor *in_tensor = td->in_tensor;
     const struct tensor *out_tensor = td->out_tensor;
-    const int height_stride = tensor_d32_stride_d32(in_tensor);
-    const int out_height_stride = depth_padding * out_width;
-    const int src_stride = tensor_row_stride_d32(in_tensor);
+    const int element_size = td ->element_size;
+    const int height_stride = depth_padding * tensor_w_total_d32(in_tensor) * element_size;
+    const int out_height_stride = depth_padding * out_width * element_size;
+    const int src_stride = tensor_w_total_d32(in_tensor) * tensor_d_total_d32(in_tensor) * element_size;
     const int dst_stride = out_height_stride * in_nd32;
     uint8_t *out_data = out_tensor->data;
-    uint8_t *in_data = tensor_location_d32(in_tensor, 0, 0, 0, 0);
+    uint8_t *in_data = (element_size == sizeof(uint16_t)) ? 
+                        (uint8_t*)tensor_location_16b_d32(in_tensor, 0, 0, 0, 0) :
+                        tensor_location_d32(in_tensor, 0, 0, 0, 0);
     l2fetch(in_data, 128, 128, (out_height * height_stride + 127) / 128u);
     const int rows = (in_nd32 == 1) ? 1 : out_height;
     const int row_bytes = (in_nd32 == 1) ? out_height : in_nd32;
     for (int b = start_batch; b < end_batch; b++)
     {
-        in_data = tensor_location_d32(in_tensor, b, 0, 0, 0);
+        in_data = (element_size == sizeof(uint16_t)) ? 
+                    (uint8_t*)tensor_location_16b_d32(in_tensor, b, 0, 0, 0) :
+                    tensor_location_d32(in_tensor, b, 0, 0, 0);
         for (int h = 0; h < rows; h++)
         {
             if (out_width % 4 == 0)
             {
                 vmemcpy_2d_asm(
-                    depth_padding * out_width,
+                    depth_padding * out_width * element_size,
                     row_bytes,
                     out_data,
                     out_height_stride,
@@ -102,7 +108,7 @@ static void convert_to_aix_d32_work(struct nn_graph *nn, void *vtd)
             else
             {
                 vmemcpy_2d_general_asm(
-                    depth_padding * out_width,
+                    depth_padding * out_width * element_size,
                     row_bytes,
                     out_data,
                     out_height_stride,
@@ -126,7 +132,7 @@ static int convert_to_aix_d32_execute(struct nn_node *self, struct nn_graph *nn)
     struct tensor *out_tensor = self->outputs[0];
     struct tensor *out_min_tensor = self->outputs[1];
     struct tensor *out_max_tensor = self->outputs[2];
-    if (tensor_out_prepare_normal_fromshape(out_tensor, &out_tensor->shape, NN_TYPE_UINT8) != 0)
+    if (tensor_out_prepare_normal_fromshape(out_tensor, &out_tensor->shape, in_tensor->format.type) != 0)
     {
         return errlog(nn, "out too small");
     }
@@ -138,6 +144,7 @@ static int convert_to_aix_d32_execute(struct nn_node *self, struct nn_graph *nn)
     int32_t out_height = out_shape.height;
     int32_t out_width = out_shape.width;
     int32_t out_depth = out_shape.depth;
+    int32_t elementsize = tensor_type_size(in_tensor->format.type);
 
     struct tdata td = {
         .in_tensor = in_tensor,
@@ -150,6 +157,7 @@ static int convert_to_aix_d32_execute(struct nn_node *self, struct nn_graph *nn)
         .out_width = out_width,
         .in_depth = in_depth,
         .out_depth = out_depth,
+        .element_size = elementsize,
     };
     nn_sem_init(&td.donesem, 0);
     if (need_convert) //Tensor is d32, run d32->aix d32 convert
@@ -179,36 +187,40 @@ static void convert_from_aix_d32_work(struct nn_graph *nn, void *vtd)
     const int in_nd32 = out_depth / depth_padding;
     const struct tensor *in_tensor = td->in_tensor;
     const struct tensor *out_tensor = td->out_tensor;
-    int height_stride = depth_padding * in_width;
+    const int element_size = td->element_size;
+    int height_stride = depth_padding * in_width * element_size;
     const int src_stride = height_stride * in_nd32;
-    const int dst_stride = tensor_row_stride_d32(out_tensor);
+    const int dst_stride = tensor_w_total_d32(out_tensor) * tensor_d_total_d32(out_tensor) * element_size;
     uint8_t *in_data = in_tensor->data;
     uint8_t *out_data = out_tensor->data;
     l2fetch(in_data, 128, 128, (in_height * height_stride + 127) / 128u);
     const int rows = (in_nd32 == 1) ? 1 : in_height;
     const int row_bytes = (in_nd32 == 1) ? in_height : in_nd32;
+
     for (int b = start_batch; b < end_batch; b++)
     {
-        out_data = tensor_location_d32(out_tensor, b, 0, 0, 0);
+        out_data = (element_size == sizeof(uint16_t)) ? 
+                    (uint8_t*)tensor_location_16b_d32(out_tensor, b, 0, 0, 0) :
+                    tensor_location_d32(out_tensor, b, 0, 0, 0);
         for (int h = 0; h < rows; h++)
         {
             if (in_width % 4 == 0)
             {
                 vmemcpy_2d_asm(
-                    depth_padding * in_width,
+                    depth_padding * in_width * element_size,
                     row_bytes,
                     out_data,
-                    depth_padding * out_width,
+                    depth_padding * out_width * element_size,
                     in_data,
                     height_stride);
             }
             else
             {
                 vmemcpy_2d_general_asm(
-                    depth_padding * in_width,
+                    depth_padding * in_width * element_size,
                     row_bytes,
                     out_data,
-                    depth_padding * out_width,
+                    depth_padding * out_width * element_size,
                     in_data,
                     height_stride);
             }
@@ -245,13 +257,14 @@ static int convert_from_aix_d32_execute(struct nn_node *self, struct nn_graph *n
     const int w_after_pad = w_total - (w_before_pad + w);
     const int d_before_pad = 0;
     const int d_after_pad = (-(d + d_before_pad)) & 31;
+    const int elementsize = tensor_type_size(in_tensor->format.type);
     if (tensor_out_prepare_padded_d32(
             out_tensor,
             b,
             h, h_before_pad, h_after_pad,
             w, w_before_pad, w_after_pad,
             d, d_before_pad, d_after_pad,
-            NN_TYPE_QUINT8) != 0)
+            in_tensor->format.type) != 0)
     {
         return errlog(nn, "out prepare fail");
     }
@@ -266,6 +279,7 @@ static int convert_from_aix_d32_execute(struct nn_node *self, struct nn_graph *n
         .out_width = w_before_pad + w + w_after_pad,
         .in_depth = in_depth,
         .out_depth = d_before_pad + d + d_after_pad,
+        .element_size = elementsize,
     };
     nn_sem_init(&td.donesem, 0);
     nn_os_work_for_vector(nn, convert_from_aix_d32_work, &td);
@@ -295,6 +309,24 @@ struct nn_node_ops nn_ops_for_Convert_to_aix_d32_d32 = {
     .n_outputs = NN_IOCOUNT(3),
     .flags = NN_NODE_FLAG_D32_INPUT};
 
+struct nn_node_ops nn_ops_for_Convert_to_aix_d32_16b = {
+    .execute = convert_to_aix_d32_execute,
+    .check = NULL,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(4),
+    .n_outputs = NN_IOCOUNT(3),
+};
+
+struct nn_node_ops nn_ops_for_Convert_to_aix_d32_16b_d32 = {
+    .execute = convert_to_aix_d32_execute,
+    .check = NULL,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(4),
+    .n_outputs = NN_IOCOUNT(3),
+    .flags = NN_NODE_FLAG_D32_INPUT};
+
 //This should always be converted to the d32 variant
 struct nn_node_ops nn_ops_for_Convert_from_aix = {
     .execute = convert_from_aix_d32_execute,
@@ -306,6 +338,25 @@ struct nn_node_ops nn_ops_for_Convert_from_aix = {
 };
 
 struct nn_node_ops nn_ops_for_Convert_from_aix_d32 = {
+    .execute = convert_from_aix_d32_execute,
+    .check = NULL,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(3),
+    .n_outputs = NN_IOCOUNT(3),
+    .flags = NN_NODE_FLAG_D32_OUTPUT};
+
+//This should always be converted to the d32 variant
+struct nn_node_ops nn_ops_for_Convert_from_aix_16b = {
+    .execute = convert_from_aix_d32_execute,
+    .check = NULL,
+    .ctor = node_alloc_common,
+    .dtor = node_free_common,
+    .n_inputs = NN_IOCOUNT(3),
+    .n_outputs = NN_IOCOUNT(3),
+};
+
+struct nn_node_ops nn_ops_for_Convert_from_aix_16b_d32 = {
     .execute = convert_from_aix_d32_execute,
     .check = NULL,
     .ctor = node_alloc_common,

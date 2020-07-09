@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -244,7 +244,7 @@ gindex_compare_func( void const *pva, void const *pvb)
 {
 	struct gcheck_entry const * pa = (struct gcheck_entry const*)pva;
 	struct gcheck_entry const * pb = (struct gcheck_entry const*)pvb;
-	if( pa->node_id < pb->node_id) return -1;
+	if( pa->node_id < pb->node_id) return  -1;
 	return pa->node_id > pb->node_id;
 }
 

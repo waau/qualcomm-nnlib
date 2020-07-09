@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -365,11 +365,11 @@ int replace_node_sequence (
 	// find the first one
     struct nn_node * searchfor;
     if( n_remove < 1 || ( searchfor = rmnodes[0]) == NULL )
-    	return -1;
+    	return errlog(nn,"n_remove < 1 || ( searchfor = rmnodes[0]) == NULL ");
     struct nn_node * current = *anchor;
     while( current != searchfor){
     	if( current == NULL)
-    		return -1;		// couldn't find the first one...
+    		return errlog(nn, "replace_node_sequence() couldn't find the first node");		// couldn't find the first one...
     	anchor = &current->next;
     	current = *anchor;
     }
@@ -396,7 +396,7 @@ int replace_node_sequence (
             while( current != searchfor){
             	if( current == NULL){
             		nn->node_count = (node_count <0)?0:node_count;
-            		return -1;		// couldn't find
+            		return errlog(nn , "replace_node_sequence() couldn't find node");		// couldn't find
             	}
             	anchor = &current->next;
             	current = *anchor;
@@ -442,7 +442,7 @@ replace_node_with_sequence(
 		// find, delete, position
 		struct nn_node *searchnode = *inspos;
 		while(searchnode!= delnode){
-			if( searchnode == NULL) return -1;	// failed to find delnode
+			if( searchnode == NULL) return errlog(nn,"replace_node_sequence() couldn't find node to delete");	// failed to find delnode
 			inspos = &searchnode->next;
 			searchnode = *inspos;
 		}
@@ -665,3 +665,117 @@ change_multi_output_refs_table( struct nn_graph * nn,
 	return errs?-1: replace_count;
 }
 
+
+/*
+* Returns a count of the number of consumers of a node
+* if req_node_type is = -1 then any node is considered valid
+* otherwise will only count instances of the given req_node_type
+*
+*
+*/
+int32_t count_all_consumers(struct nn_graph *nn,
+    const struct nn_node *producer,
+    int req_node_type,
+    uint32_t *count)
+{
+    //Sanity test 1
+    if(req_node_type < -1){
+        return errlog(nn, "error in count all consumers recieved invalid req_node_type: %d", req_node_type);
+    }
+    //Sanity test 2
+    if(producer == NULL){
+        return errlog(nn, "error in count all consumers recieved NULL producer node");
+    }
+    //Sanity test 3
+    if(count == NULL){
+        return errlog(nn, "error in count all consumers recieved NULL count pointer");   
+    }
+    //Ok so we should not crash horribly now
+    //Ensure count is set to 0 initially
+    *count = 0U;
+    struct nn_node *tmp;
+    struct input const *in;
+    uint32_t prod_id = producer->node_id;
+    noderefhash_set_t prod_hashmask = noderefhash_mask(prod_id);
+    for( tmp = producer->next; tmp != NULL; tmp = tmp->next) {
+        if( (tmp->noderefhash & prod_hashmask)!=0){
+            for (int i = 0; i < tmp->n_inputs; i++) {
+                in = &tmp->input_refs[i];
+                if (in->src_id == prod_id && in->output_idx == 0 ){
+                    if(req_node_type >= 0 && tmp->node_type == req_node_type){
+                        //Found a valid consumer
+                        (*count)++;
+                    }
+                    else if (req_node_type == -1){
+                        //Also valid
+                        (*count)++;
+                    }
+                    //Fall through node doesn't count
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/*
+*   Fills the list consumer_list with all consumers of a node
+*   Assumes that consumer_list can store count items
+*   If more or less than count items are found an error is generated
+*/
+int32_t find_all_consumers(struct nn_graph *nn,
+    const struct nn_node *producer,
+    int req_node_type,
+    struct nn_node **consumer_list,
+    const uint32_t count)
+{
+    //Sanity test 1
+    if(req_node_type < -1){
+        return errlog(nn, "error in find_all_consumers recieved invalid req_node_type: %d", req_node_type);
+    }
+    //Sanity test 2
+    if(producer == NULL){
+        return errlog(nn, "error in find_all_consumers recieved NULL producer node");
+    }
+    //Sanity test 3
+    if(count == 0U){
+        return errlog(nn, "error in find_all_consumers recieved 0 count");   
+    }
+    //Sanity test 4
+    if(consumer_list == NULL){
+        return errlog(nn, "error in find_all_consumers recieved NULL consumer_list");
+    }
+    //Ok so we should not crash horribly now
+    //Keep our own counter of found nodes
+    uint32_t found_nodes = 0U;
+    struct nn_node *tmp;
+    struct input const *in;
+    uint32_t prod_id = producer->node_id;
+    noderefhash_set_t prod_hashmask = noderefhash_mask(prod_id);
+    for( tmp = producer->next; tmp != NULL; tmp = tmp->next) {
+        if( (tmp->noderefhash & prod_hashmask)!=0){
+            for (int i = 0; i < tmp->n_inputs; i++) {
+                in = &tmp->input_refs[i];
+                if (in->src_id == prod_id && in->output_idx == 0 ){
+                    if((req_node_type >= 0 && tmp->node_type == req_node_type)||req_node_type == -1){
+                        //Increment found nodes
+                        ++found_nodes;
+                        if(found_nodes > count){
+                            //Too many found nodes
+                            //Can not safely access consumer_list
+                            //Abort
+                            return errlog(nn, "error in find_all_consumers found %u nodes but was told there were only %u nodes to be found", found_nodes, count);
+                        }
+                        //We pre-incremented found nodes so here we access the list at found_nodes-1
+                        consumer_list[found_nodes-1U] = tmp;
+                    }
+                }
+            }
+        }
+    }
+    //Check that we found all the nodes
+    if(found_nodes != count){
+        return errlog(nn, "error in find_all_consumers found %u nodes but was told there were %u nodes to find", found_nodes, count);
+    }
+    return 0;
+}

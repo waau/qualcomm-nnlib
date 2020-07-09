@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -186,7 +186,7 @@ concat_setup_strategy( struct nn_node * self, struct nn_graph *nn, struct concat
 	int num_in = info->num_in;
 	int concat_dim = tensor_get_int32( self->inputs[0],0);
 	// check valid
-	if( concat_dim <0 || concat_dim > 3) return errlog(nn,"bad dim index");
+	if( concat_dim <0 || concat_dim > 3) return errlog(nn,"bad dim index , concat_dim =%d ",concat_dim);
 
 	info->concat_dim = concat_dim;
 	info->indescs[0].intens = *data_tensors[0];

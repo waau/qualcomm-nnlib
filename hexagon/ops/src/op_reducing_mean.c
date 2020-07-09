@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -244,7 +244,7 @@ static int reducing_mean_execute(struct nn_node *self, struct nn_graph *nn)
         axes[i] = axes_orig[i];
     }
     if (handle_negative_axes(nn, axes, axes_size) != 0)
-        return -1;
+        return errlog(nn,"Axes are not sane ");
 
     //Handle negative axis also checks that the axes are sane, so we don't need to check them here
     for (int i = 0; i < axes_size; i++)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (mulject to the limitations in the
@@ -202,6 +202,11 @@ struct qmul_8x8to8_info {
 	int a_offset, b_offset;	// the zero-offsets of the inputs
 	volatile int32_t minlevel,maxlevel;	// these keep the min/max overall.
 };
+struct qmul_8x8to8_info_static_minmax {
+	int a_offset, b_offset;
+	int out_zero;
+	uint32_t scale;
+};
 // mul vector by vector
 static void  qmul_8x8to8_stride_11( void *out, void const *in1, void const *in2, int n, void *opaque)
 {
@@ -299,6 +304,76 @@ static const struct elementwise_funcs QuantizedMul_8x8to8_funcs = {
 	.scratch_elbytes = 2			// -> causes scratch array of 2-byte elements to be used as output.
 };
 
+static void  qmul_8x8to8_stride_11_static_minmax( void *out, void const *in1, void const *in2, int n, void *opaque)
+{
+	struct qmul_8x8to8_info_static_minmax *info = (struct qmul_8x8to8_info_static_minmax*)opaque;
+	uint8_t * op = (uint8_t*)out;
+	uint8_t const * inp1 = (uint8_t const *)in1;
+	uint8_t const * inp2 = (uint8_t const *)in2;
+	int a_offs = info->a_offset;
+	int b_offs = info->b_offset;
+	uint32_t scale = info->scale;
+	int out_zero = info->out_zero;
+	uint8_t a, b;
+	if( n > 0){
+		a = *inp1++;
+		b = *inp2++;
+		int32_t s = (a - a_offs) * (b - b_offs);
+		s = ((int64_t)s*(int64_t)scale) >> 30;
+		for(int i = 0; i < n-1; i++){
+			*op++ = saturate_u8((s+out_zero)>>1);
+			s = (*inp1++ - a_offs) * (*inp2++ - b_offs);
+			s = ((int64_t)s*(int64_t)scale) >> 30;
+		}
+		*op = saturate_u8((s+out_zero)>>1);
+	}
+}
+
+static void  qmul_8x8to8_vec_by_scalar_static_minmax( struct qmul_8x8to8_info_static_minmax *info,
+		uint8_t *outp, uint8_t const *inp, int64_t bval, int64_t delt, int n)
+{
+	int32_t p;
+	for( int i =0; i < n; i++){
+		uint8_t aval = inp[i];
+		p = ((aval * bval) + delt)>>31;
+		outp[i] = saturate_u8(p);
+	}	
+}
+
+static void  qmul_8x8to8_stride_10_static_minmax( void *out, void const *in1, void const *in2, int n, void *opaque)
+{
+	struct qmul_8x8to8_info_static_minmax *info = (struct qmul_8x8to8_info_static_minmax*)opaque;
+	uint8_t * op = (uint8_t*)out;
+	uint8_t const * inp1 = (uint8_t const *)in1;
+	int bval = (*(uint8_t const *)in2 - info->b_offset);
+	int64_t scaled_bval = ((int64_t)bval)*((int64_t)info->scale);
+	int64_t delt = (info->a_offset*bval)*((int64_t)info->scale);
+	delt = ((int64_t)info->out_zero*(int64_t)(1<<30)) - delt;
+	qmul_8x8to8_vec_by_scalar_static_minmax( info, op, inp1, scaled_bval, delt, n);
+}
+
+static void qmul_8x8to8_rev_stride_01_static_minmax(void *out, void const *in1, void const *in2, int n, void *opaque)
+{
+	struct qmul_8x8to8_info_static_minmax *info = (struct qmul_8x8to8_info_static_minmax*)opaque;
+	uint8_t * op = (uint8_t*)out;
+	uint8_t const * inp1 = (uint8_t const *)in1;
+	int bval = (*(uint8_t const *)in2 - info->a_offset);
+	int64_t scaled_bval = ((int64_t)bval) * ((int64_t)info->scale);
+	int64_t delt = (info->b_offset*bval)*((int64_t)info->scale);
+	delt = ((int64_t)info->out_zero*(int64_t)(1<<30)) - delt;
+	qmul_8x8to8_vec_by_scalar_static_minmax( info, op, inp1, scaled_bval, delt, n);
+}
+
+static const struct elementwise_funcs QuantizedMul_funcs_static_minmax = {
+	.op_stride_11 = qmul_8x8to8_stride_11_static_minmax,
+	.op_stride_10 = qmul_8x8to8_stride_10_static_minmax,
+	.op_rev_stride_01 = qmul_8x8to8_rev_stride_01_static_minmax,
+	.in_elbytes = 1,
+	.out_elbytes = 1,
+	.out_typecode =  NN_TYPE_QUINT8,
+	.scratch_elbytes = 0
+};
+
 static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *a_tensor = self->inputs[0];
@@ -320,6 +395,11 @@ static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 
 	int a_offset = saturate_u8( roundf_i32(-a_min_float/a_level_size));
 	int b_offset = saturate_u8( roundf_i32(-b_min_float/b_level_size));
+	int out_zero;
+	float scaleby;
+	float out_level_size=0.0f;
+	// actual range of product; adjust for accurate zero code.
+	float out_min0, out_max0;
 
 #ifdef DEBUG_PRINT_PERFORMANCE
 	int start_time, end_time;//, t1, t2, t3, t4, t5;
@@ -374,7 +454,32 @@ static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 			}
 		}
 
-	}else{
+	} else if(self->n_inputs == 8){
+		//Have static min/max
+		const struct tensor *static_min_tensor = self->inputs[6];
+		const struct tensor *static_max_tensor = self->inputs[7];
+		out_min0 = tensor_get_float(static_min_tensor, 0);
+		out_max0 = tensor_get_float(static_max_tensor, 0);
+		struct qmul_8x8to8_info_static_minmax info;
+		adjust_minmax_for_zero( & out_min0, &out_max0);
+		out_min = out_min0;
+		out_max = out_max0;
+		out_zero = get_qu8_level_size_zero( out_min, out_max, &out_level_size);
+		scaleby = prod_level_size / out_level_size;
+		uint32_t recip_shamt = (scaleby <= 1.0f)?0:flt_getexp(scaleby);
+		uint32_t scale_static = roundf_u32((float)(1U<<(31-recip_shamt))*scaleby);
+		info.a_offset = a_offset;
+		info.b_offset = b_offset;
+		info.out_zero = 2*out_zero+1;
+		info.scale = scale_static;
+		int res = nn_elementwise_with_broadcast(self, nn, &QuantizedMul_funcs_static_minmax, NULL, NULL, &info);
+		if(0 != res){
+			return errlog(nn, "Error in QuantizedMul_8 elementwise_funcs returned non-zero status %d", res);
+		}
+		tensor_set_single_float( out_min_tensor,out_min);
+		tensor_set_single_float( out_max_tensor,out_max);
+		return 0;
+	} else{
 		struct qmul_8x8to8_info info;
 		info.tmp_buf = NULL;
 		info.a_offset = a_offset;
@@ -399,28 +504,23 @@ static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 		// We now choose the output range, and quantize the results.
 		//
 		if (info.maxlevel == info.minlevel) info.maxlevel += 4;	// can't both be 0.
-
-		// actual range of product; adjust for accurate zero code.
-		float out_min0 = info.minlevel * prod_level_size;
-		float out_max0 = info.maxlevel * prod_level_size;
+	
+		out_min0 = info.minlevel * prod_level_size;
+		out_max0 = info.maxlevel * prod_level_size;
+		
 		adjust_minmax_for_zero( & out_min0, &out_max0);
 		out_min = out_min0;
 		out_max = out_max0;
-
-
-		float output_level_size = flt_div_255( out_max- out_min);
-		int out_zero = saturate_u8( roundf_i32(-out_min/output_level_size));
-
-		float scaleby;
-		if( prod_level_size * (float)(1.0/16.0) < output_level_size){	// which should almost always be true...
-			scaleby = prod_level_size / output_level_size;
+		out_zero = get_qu8_level_size_zero( out_min, out_max, &out_level_size);
+		if( prod_level_size * (float)(1.0/16.0) < out_level_size){	// which should almost always be true...
+			scaleby = prod_level_size / out_level_size;
 		}else{
 			// scaling wants scale *up* by >16. Unlikely but possible. Instead, force scaling
 			// to exactly 16.0 and increase the output range to make that correct. zero is unchanged.
 			scaleby = 16.0f;		// bump range to avoid scaleby > 16
-			output_level_size = prod_level_size* (float)(1.0/16.0);
-			out_min = -out_zero * output_level_size;
-			out_max = (255-out_zero) * output_level_size;
+			out_level_size = prod_level_size* (float)(1.0/16.0);
+			out_min = -out_zero * out_level_size;
+			out_max = (255-out_zero) * out_level_size;
 		}
 		int nvals = out_tensor->data_size;		// # of values to convert
 		// the values in the temp area are uint16, but they are really the 16 lsbs of products which could range over -65025 .. 65025.
@@ -474,7 +574,6 @@ static int mul_8x8to8_execute(struct nn_node *self, struct nn_graph *nn)
 static int mul_q8_check(struct nn_node *self, struct nn_graph *nn)
 {
 	logmsg(nn,2,"mul node %p",self);
-
 	// if 8x8to8 mul, we need scratch for 2x the max output
     ///if( self->node_type == OP_QuantizedMul_8x8to8 || self->node_type == OP_QuantizedMul_8x8to8_ref){
 	if(1){
@@ -527,7 +626,7 @@ struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8 = {
 	.check = mul_q8_check,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.n_inputs = NN_IOCOUNT(6),
+	.n_inputs = NN_IOCOUNT_RANGE(6, 8),
 	.n_outputs = NN_IOCOUNT(3),
 };
 struct nn_node_ops nn_ops_for_QuantizedMul_8x8to8_ref = {

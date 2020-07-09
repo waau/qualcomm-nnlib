@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -51,6 +51,7 @@
 #include "nn_oemnode.h"
 #include "transpose_conv_procweights.h"
 #include "nn_axis.h"
+#include "cast_utils.h"
 
 // output desc for scalar floats.
 extern const struct output Output_ScalarFloat;
@@ -130,6 +131,17 @@ struct nn_node* find_unique_consumer(
     int req_node_type,
     const int *node_types,
 	int options);
+int32_t count_all_consumers(
+	struct nn_graph* nn,
+	const struct nn_node *producer,
+	int req_node_type,
+	uint32_t *count);
+int32_t find_all_consumers(
+	struct nn_graph* nn,
+	const struct nn_node *producer,
+	int req_node_type,
+	struct nn_node **consumer_list,
+	const uint32_t count);
 
 static inline
 struct nn_node* find_unique_consumer_mustbe(
@@ -387,5 +399,9 @@ change_multi_output_refs_table( struct nn_graph * nn,
 
 // used to convert a 13-input supernode (with channelscale) to 12
 int handle_channelscaled_supernode( struct nn_graph *nn, struct nn_node *nodep);
+
+//Used to find QuantizedMul_8x8to32 -> Requantize/QuantizeDown
+//patterns and fold them into QuantizedMul_8x8to8
+int find_and_replace_mul_qdown_nodes(struct nn_graph *nn, struct nn_node **node_to_test_p);
 
 #endif //NN_PREPARE_H

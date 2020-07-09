@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -49,6 +49,7 @@
 #include "hexagon_nn_ops.h"
 #include "nn_graph_ops.h"
 #include "nn_string_map.h"
+#include "nn_graph_log.h"
 
 #ifdef __hexagon__
 #include "nn_graph_os.h"
@@ -120,7 +121,7 @@ static int find_hash_of( char const *s)
 //
 int op_type_from_string( char const * s )
 {
-    if( s== NULL || s[0] == 0 ) return -1;
+    if( s== NULL || s[0] == 0 ) return errlog(NULL, "param string is NULL ");
     int hashval = find_hash_of(s);
     uint16_t * ptr = &Opname_hash_table[hashval];
     HASH_MUTEX_LOCK();
@@ -229,5 +230,5 @@ padding_type_from_string( char const * str )
      default:
         ;
     }
-    return -1;
+    return errlog(NULL,"invalid string for padding_type");
 }

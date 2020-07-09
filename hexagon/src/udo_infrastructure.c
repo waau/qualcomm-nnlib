@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -41,10 +41,6 @@
 #else
 #define NUM_MAX_THREADS 2
 #endif
-
-#define API_VERSION_MAJOR 1
-#define API_VERSION_MINOR 3
-#define API_VERSION_TEENY 0
 
 #define N_HEXNN_TENSORS_PER_UDO_TENSOR_NONQUANT 1
 #define N_HEXNN_TENSORS_PER_UDO_TENSOR_TF 3
@@ -185,7 +181,10 @@ uint32_t udo_get_vtcm_size (void* hexnn_reserve) {   // available after init
 
 void* udo_get_vtcm_ptr (void* hexnn_reserve) {  // available only during execute
         return (((graph_node*)hexnn_reserve)->graph)->vtcm_ptr;
+}
 
+uint32_t udo_vtcm_is_real(void* hexnn_reserve) {
+        return (((graph_node*)hexnn_reserve)->graph)->vtcm_is_real;
 }
 
 void threading_function (struct nn_graph* nn, void* t) {
@@ -214,7 +213,7 @@ void udo_run_worker_threads (void* hexnn_reserve, uint32_t n_threads, workerThre
 int initialize_udo_infra(){
 
         dspInfra = (SnpeUdo_DspGlobalInfrastructure_t*)nn_malloc(sizeof(SnpeUdo_DspGlobalInfrastructure_t));
-        if (dspInfra == NULL)  return -1;
+        if (dspInfra == NULL)  return errlog(NULL,"nn_malloc failed for dspInfra");
         SnpeUdo_Version_t dsp_ver = {API_VERSION_MAJOR, API_VERSION_MINOR, API_VERSION_TEENY};
         dspInfra->dspInfraVersion = dsp_ver;
         dspInfra->infraType = UDO_INFRA_HEXNN_V2;
@@ -229,6 +228,7 @@ int initialize_udo_infra(){
         funcs->udoFree = udo_free;
         funcs->udoGetVtcmSize = udo_get_vtcm_size;
         funcs->udoGetVtcmPtr = udo_get_vtcm_ptr;
+        funcs->udoVtcmIsReal = udo_vtcm_is_real;
         funcs->udoRunWorkerThreads = udo_run_worker_threads;
         return 0;
 }; 

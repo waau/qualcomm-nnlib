@@ -51,6 +51,7 @@ hexagon/src/expand_dilated_conv_nodes.c
 hexagon/src/dwconv2dbbb_c.c
 hexagon/src/dwconv2dhhh_c.c
 hexagon/src/nn_pqueue.c
+hexagon/src/serialize_graph.c
 hexagon/ops/src/op_resizebilinear.c 
 hexagon/ops/src/op_resizebilinear_d32.c 
 hexagon/ops/src/op_batchspace.c 
@@ -234,3 +235,11 @@ hexagon/ops/src/op_correlation1d.c
 hexagon/ops/src/op_l2normalize_8_ref.c
 hexagon/ops/src/op_ssd_detection_out.c
 hexagon/src/udo_infrastructure.c
+hexagon/ops/src/op_hard_swish.c
+hexagon/src/bestk.c
+hexagon/ops/src/op_layernorm_i16.c
+hexagon/ops/src/op_eqLSTM_qASR.c
+hexagon/src/expand_eqLSTM_qASR_nodes.c
+hexagon/ops/src/op_clip.c
+hexagon/ops/src/op_quantized_cast.c 
+hexagon/src/prepare_matmul_16_weights.c

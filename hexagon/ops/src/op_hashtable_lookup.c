@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -84,7 +84,7 @@ struct lookups_data {
 // returns -1 if key not found
 static int32_t bisearch(int32_t *data, int32_t start, int32_t end, int32_t key){
     if (start>end){
-	return -1;
+	return errlog( NULL, " start > end in bisect");
     }
     int32_t mid = (start+end)/2;
     int32_t cur = *(data+mid);

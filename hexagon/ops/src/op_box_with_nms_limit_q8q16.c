@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -269,7 +269,7 @@ static int box_with_nms_limit_q8q16_execute(struct nn_node *self, struct nn_grap
 	while(boxes_processed < total_boxes){
 
 		int batch_size = 0, keep_from_batch = 0;
-		while (batch_info_data[batch_size] == *batch_info_data && batch_size < total_boxes) batch_size++;
+		while (batch_info_data[batch_size] == *batch_info_data && boxes_processed + batch_size < total_boxes) batch_size++;
 
 		nms_box* boxes_base = nn_malloc(batch_size*num_classes*sizeof(nms_box));
 		int total_loaded = load_boxes_scores(boxes_input+boxes_processed*DATA_PER_ROI*num_classes, scores_input+boxes_processed*num_classes, scores_min, scores_max, batch_size, num_classes, score_threshold, box_lists, boxes_base);

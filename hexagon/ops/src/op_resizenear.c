@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -60,13 +60,15 @@ struct resize_8_t_data {
 	uint32_t rows;
 	float xscale;
 	float yscale;
+	uint32_t align_corners;
+	uint32_t half_pixel_centers;
 };
 
 
-// Specific method for align corners.  So that performance of non-aligned isn't impacted
+// Specific method for align corners and half_pixel_centers.  So that performance of default method isn't impacted
 
 // TODO: Merge these without impacting non-aligned corners
-static void resize8_worker_thread_align_corners(struct nn_graph *nn, void *tdata) {
+static void resize8_worker_thread_specific(struct nn_graph *nn, void *tdata) {
 	struct resize_8_t_data *td = tdata;
 	uint8_t *out = td->out_data;
 	uint8_t *hstart;
@@ -82,10 +84,18 @@ static void resize8_worker_thread_align_corners(struct nn_graph *nn, void *tdata
  		out += td->start_row * td->newwidth * td->d_in;
  		bstart = (uint8_t*)td->in_data + b*td->h_in*td->w_in*td->d_in;
  		for (h = td->start_row; h < (td->start_row + td->rows); h++) {
-		 	close_h = MIN(round(h*td->yscale), td->h_in - 1);
+			if (td->align_corners) {
+		 		close_h = MIN(roundf(h*td->yscale), td->h_in - 1);
+			} else if (td->half_pixel_centers) {
+				close_h = MIN((h+0.5f) * td->yscale, td->h_in - 1);
+			}
  			hstart = bstart + close_h*td->w_in*td->d_in;
  			for (w = 0; w < td->newwidth; w++) {
- 				close_w = MIN(round(w*td->xscale), td->w_in -1);
+				if (td->align_corners) {
+		 			close_w = MIN(roundf(w*td->xscale), td->w_in -1);
+				} else if (td->half_pixel_centers) {
+					close_w = MIN((w+0.5f) * td->xscale, td->w_in - 1);
+				}
  				wstart = hstart + close_w*td->d_in;
  				vmemcpy_asm(out,wstart,depth_bytes);
  				out += depth_bytes;
@@ -131,9 +141,14 @@ static int resizenear_8_execute(struct nn_node *self, struct nn_graph *nn)
 	const struct tensor *in_min_tensor = self->inputs[2];
 	const struct tensor *in_max_tensor = self->inputs[3];
 	uint32_t align_corners = 0;
-	if (self->n_inputs == 5) {
+	if (self->n_inputs >= 5) {
 		const struct tensor *align_corners_tensor = self->inputs[4];
 		align_corners = tensor_get_int32(align_corners_tensor, 0);
+	}
+	uint32_t half_pixel_centers = 0;
+	if (self->n_inputs >= 6) {
+		const struct tensor *half_pixel_centers_tensor = self->inputs[5];
+		half_pixel_centers = tensor_get_int32(half_pixel_centers_tensor, 0);
 	}
 	struct tensor *out_tensor = self->outputs[0];
 	struct tensor *out_min_tensor = self->outputs[1];
@@ -160,12 +175,15 @@ static int resizenear_8_execute(struct nn_node *self, struct nn_graph *nn)
 	struct resize_8_t_data tdata[NUM_THREADS];
 	uint32_t rows_per_thread = newheight / NUM_THREADS;
 
-	if (align_corners && (newheight > 1) && (newwidth > 1)) {
-		xscale = (float)(w_in-1)/((float)newwidth-1);
+	if (align_corners && (newheight > 1)) {
 		yscale = (float)(h_in-1)/((float)newheight-1);
 	} else {
-		xscale = (float)w_in/newwidth;
 		yscale = (float)h_in/newheight;
+	}
+	if (align_corners && (newwidth > 1)) {
+		xscale = (float)(w_in-1)/((float)newwidth-1);
+	} else {
+		xscale = (float)w_in/newwidth;
 	}
 	for (int tid = 0; tid < NUM_THREADS; tid++) {
 			tdata[tid].whoami = tid;
@@ -182,15 +200,17 @@ static int resizenear_8_execute(struct nn_node *self, struct nn_graph *nn)
 
 			tdata[tid].start_row = rows_per_thread * tid;
 			tdata[tid].rows = rows_per_thread;
+			tdata[tid].align_corners = align_corners;
+			tdata[tid].half_pixel_centers = half_pixel_centers;
 			nn_sem_init(&tdata[tid].donesem, 0);
 		}
 	tdata[NUM_THREADS-1].rows += newheight % NUM_THREADS;
 
-	// Use a different method depending on align_corners.  This is to keep
-	// non-aligned corners fast.
+	// Use a different method depending on align_corners and half_pixel_centers.  This is to keep
+	// default method fast.
 	for(int i = 0; i < NUM_THREADS; i++){
-		if (align_corners) {
-        	nn_os_work_for_vector(nn, resize8_worker_thread_align_corners, &tdata[i]);
+		if (align_corners || half_pixel_centers) {
+        	nn_os_work_for_vector(nn, resize8_worker_thread_specific, &tdata[i]);
         } else {
         	nn_os_work_for_vector(nn, resize8_worker_thread, &tdata[i]);
         }
@@ -278,6 +298,16 @@ static int resizenear_f_execute(struct nn_node *self, struct nn_graph *nn)
 {
 	const struct tensor *in_tensor = self->inputs[0];
 	const struct tensor *newdim_tensor = self->inputs[1];
+	uint32_t align_corners = 0;
+	if (self->n_inputs >= 3) {
+		const struct tensor *align_corners_tensor = self->inputs[2];
+		align_corners = tensor_get_int32(align_corners_tensor, 0);
+	}
+	uint32_t half_pixel_centers = 0;
+	if (self->n_inputs >= 4) {
+		const struct tensor *half_pixel_centers_tensor = self->inputs[3];
+		half_pixel_centers = tensor_get_int32(half_pixel_centers_tensor, 0);
+	}
 	struct tensor *out_tensor = self->outputs[0];
 	const int32_t *newdims = newdim_tensor->data;
 	const int32_t newheight = newdims[0];
@@ -286,8 +316,18 @@ static int resizenear_f_execute(struct nn_node *self, struct nn_graph *nn)
 	const int32_t h_in = in_tensor->shape.height;
 	const int32_t w_in = in_tensor->shape.width;
 	const int32_t d_in = in_tensor->shape.depth;
-	const float xscale = (float)w_in/newwidth;
-	const float yscale = (float)h_in/newheight;
+	float xscale;
+	float yscale;
+	if (align_corners && (newheight > 1)) {
+		yscale = (float)(h_in-1)/((float)newheight-1);
+	} else {
+		yscale = (float)h_in/newheight;
+	}
+	if (align_corners && (newwidth > 1)) {
+		xscale = (float)(w_in-1)/((float)newwidth-1);
+	} else {
+		xscale = (float)w_in/newwidth;
+	}
 	uint32_t close_h;
 	uint32_t close_w;
 	int b,h,w;
@@ -306,10 +346,22 @@ static int resizenear_f_execute(struct nn_node *self, struct nn_graph *nn)
 	for (b = 0; b < b_in; b++) {
 		bstart = in + b*h_in*w_in*d_in;
 		for (h = 0; h < newheight; h++) {
-			close_h = h * yscale;
+			if (align_corners) {
+				close_h = MIN(roundf(h * yscale), h_in - 1);
+			} else if (half_pixel_centers) {
+ 				close_h = MIN((h+0.5f) * yscale, h_in - 1);
+			} else {
+				close_h = h * yscale;
+			}
 			hstart = bstart + close_h*w_in*d_in;
 			for (w = 0; w < newwidth; w++) {
-				close_w = w*xscale;
+				if (align_corners) {
+ 					close_w = MIN(roundf(w * xscale), w_in -1);
+				} else if (half_pixel_centers) {
+ 					close_w = MIN((w+0.5f) * xscale, w_in - 1);
+				} else {
+					close_w = w*xscale;
+				}
 				wstart = hstart + close_w*d_in;
 				memcpy(out,wstart,depth_bytes);
 				out += depth_bytes;
@@ -326,11 +378,11 @@ struct nn_node_ops nn_ops_for_ResizeNearestNeighbor_f = {
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.n_inputs = NN_IOCOUNT(2),		// TODO support align corners input
+	.n_inputs = NN_IOCOUNT_RANGE(2,4),
 	.n_outputs = NN_IOCOUNT(1),
 };
 
-// INS: intensor, inmin, inmax, newdims, align_corners (optional)
+// INS: intensor, inmin, inmax, newdims, align_corners (optional), half_pixel_centers (optional)
 // OUTS: outputtensor, outmax, outmin
 
 struct nn_node_ops nn_ops_for_ResizeNearestNeighbor_8 = {
@@ -338,7 +390,7 @@ struct nn_node_ops nn_ops_for_ResizeNearestNeighbor_8 = {
 	.check = NULL,
 	.ctor = node_alloc_common,
 	.dtor = node_free_common,
-	.n_inputs = NN_IOCOUNT_RANGE(4,5),
+	.n_inputs = NN_IOCOUNT_RANGE(4,6),
 	.n_outputs = NN_IOCOUNT(3),
 };
 

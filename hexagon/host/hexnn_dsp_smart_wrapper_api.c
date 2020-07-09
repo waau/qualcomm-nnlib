@@ -348,6 +348,13 @@ __QAIC_STUB_EXPORT int hexagon_nn_set_graph_option(hexagon_nn_nn_id id, const ch
     return select_stub_fn(hexagon_nn_domains_set_graph_option_fnptr, hexagon_nn_set_graph_option_fnptr, h, id, name, value);
 }
 
+__QAIC_STUB_EXPORT int hexagon_nn_execute_with_option(hexagon_nn_nn_id id, const hexagon_nn_tensordef* inputs, int inputsLen,
+    hexagon_nn_tensordef* outputs, int outputsLen, hexagon_nn_execute_info* execute_info, const hexagon_nn_execute_option *options, int n_options)
+{
+    CHECK_DOMAINS_AND_OPEN_HANDLE
+    return select_stub_fn(hexagon_nn_domains_execute_with_option_fnptr, hexagon_nn_execute_with_option_fnptr, h, id, inputs, inputsLen, outputs, outputsLen, execute_info, options, n_options);
+}
+
 __QAIC_STUB_EXPORT int hexagon_nn_domains_config(remote_handle64 _h)
 {
     return -1;
@@ -529,6 +536,11 @@ __QAIC_STUB_EXPORT int hexagon_nn_domains_get_power(remote_handle64 _h, int type
 }
 
 __QAIC_STUB_EXPORT int hexagon_nn_domains_set_graph_option(remote_handle64 _h, hexagon_nn_nn_id id, const char* name, int value)
+{
+    return -1;
+}
+
+__QAIC_STUB_EXPORT int hexagon_nn_domains_execute_with_option(remote_handle64 _h, hexagon_nn_nn_id id, const hexagon_nn_tensordef* inputs, int inputsLen, hexagon_nn_tensordef* outputs, int outputsLen, hexagon_nn_execute_info* execute_info, const hexagon_nn_execute_option *options, int n_options)
 {
     return -1;
 }

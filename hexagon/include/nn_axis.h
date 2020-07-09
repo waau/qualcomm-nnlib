@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -66,7 +66,7 @@ static inline int get_number_elements_between_axes(const struct shape in_shape, 
         }
         return count;
     }
-    return -1;
+    return errlog(NULL,"invalid  first_axis_inclusive =%d  and last_axis_exclusive =%d  ",first_axis_inclusive,last_axis_exclusive);
 }
 
 #endif //HEXAGON_NN_NN_AXIS_H

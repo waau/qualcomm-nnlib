@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -502,7 +502,7 @@ static int compare_execute(struct nn_node *self, struct nn_graph *nn, int op)
     retval = 0;
     if (td.opt_flag == 2)
     {
-        return -1;
+        return errlog(nn,"compare_tdata.opt_flag ==2 ");
     }
 
     if (td.opt_flag == 1 && td.mode == NN_TYPE_QUINT8)

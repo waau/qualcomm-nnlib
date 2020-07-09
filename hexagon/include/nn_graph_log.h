@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -75,10 +75,10 @@ int nn_errlog_function(const char *filename, unsigned int line, struct nn_graph 
 #define logmsg(NN,LEVEL,...)  ({if(0)nn_logmsg_function("",0,NN,LEVEL,__VA_ARGS__);})
 #else
 #define logmsg(NN,LEVEL,...) do { if(( !__builtin_constant_p(LEVEL)) || ((LEVEL) <= NN_LOG_MAXLEV)) \
-		if((LEVEL) <= (NN)->debug_level)nn_logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__); } while(0)
+		if((LEVEL)==0 || (NULL != (NN) && (LEVEL) <= ((struct nn_graph *)NN)->debug_level))nn_logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__); } while(0)
 #endif
 #else // no NN_LOG_MAXLEV
-#define logmsg(NN,LEVEL,...) ({if((LEVEL) <= (NN)->debug_level)nn_logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__);})
+#define logmsg(NN,LEVEL,...) ({if((LEVEL)==0 || (NULL != (NN) && (LEVEL) <= ((struct nn_graph *)NN)->debug_level))nn_logmsg_function(__FILE__,__LINE__,NN,LEVEL,__VA_ARGS__);})
 #endif
 
 // nn_errlog_function assumed to return -1, to improve optimization in area of call.

@@ -723,12 +723,13 @@ QuantizedBatchNorm_8x8p32to8_d32:
 
 
 QuantizedResizeBilinear_8:
-    4..5 inputs:
+    4..6 inputs:
         0: Input data (quint8 tensor) [b,h_in,w_in,d]
         1: Dimension (int32 tensor) [1,1,1,2]
         2: Input min (float scalar)
         3: Input max (float scalar)
         4: Align_corners (float scalar) optional
+        5: Half_pixel_centers (float scalar) optional
     3 outputs:
         0: Output data (quint8 tensor) [b,h_out,w_out,d]
         1: Output min (float scalar)
@@ -736,15 +737,17 @@ QuantizedResizeBilinear_8:
     The operation resize (resample) in h & w dimensions.
     Dimension - shape is [1,1,1,2]; {h_out,w_out} in last dimension.
     Align_corners - default is 0.
+    Half_pixel_centers - default is 0.
 
 
 QuantizedResizeBilinear_8_d32:
-	4 inputs:
+	4..6 inputs:
 		0: input data (quint8);  shape [b,h_in,w_in,dep] 	 	- d32 format if QuantizedResizeBilinear_8_d32
 		1: dims: tensor of int32, shape [1,1,1,2],  { h_out, w_out }
 		2: input min
 		3: input max
 		4: (optional) align_corners, default is 0
+		5: (optional) half_pixel_centers, default is 0
 	3 outputs:
 		0: output data (quint8, d32 format); shape [b,h_out, w_out, dep]
 		1: output min
@@ -752,10 +755,11 @@ QuantizedResizeBilinear_8_d32:
 	bilinear resize (resample) in h & w dimensions.
 
 ResizeBilinear_f:
-	2 inputs:
+	2..4 inputs:
 		0: input data (floats);  shape [b,h_in,w_in,dep]
 		1: dims: tensor of int32, shape [1,1,1,2],  { h_out, w_out }
 		2: (optional) align_corners, default is 0
+		3: (optional) half_pixel_centers, default is 0
 	3 outputs:
 		0: output data (floats); shape [b,h_out, w_out, dep]
 	bilinear resize (resample) in h & w dimensions.
@@ -777,26 +781,29 @@ ConcatV2_int32:
 
 
 QuantizedConcat_8:
-    3n+1 inputs:
-        0: Dimension (int32 scalar)
-        1-n: Input data tensors (quint8 tensor)
-        n+1-2n: Input min (float scalar)
-        2n+1-3n: Input max (float scalar)
-    3 outputs:
-        0: Output data (quint8 tensor)
-        1: Output min (float scalar)
-        2: Output max (float scalar)
-    The operation concatenate tensors. Currently we only support along the depth dimension. The 
-        operation also requantizes values. 
-    Dimension - Currently only depthwise concatenation (3) is supported.
-
+	3N+1 or 3N+3 inputs:
+		0: Dimension tensor.  Currently only depthwise concatenation (3) is supported.
+		1-N: Input data tensors (quint8)
+		N+1-2N: minima
+		2N+1-3N: maxima
+		3N+1: output min (optional)
+		3N+2: output max (optional)
+	3 outputs:
+		0: Output data (quint8)
+		1: Output min
+		2: Output max
+	Concatenate tensors.  Currently we only support along the depth dimension.
+	This requantizes values.  In the future we will remove the requantization work if
+	all the minima/maxima are the same (or require that will be true?).
 
 QuantizedConcat_8_d32:
-	3N+1 inputs:
+	3N+1 or 3N+3 inputs:
 		0: Dimension tensor.   Single integer specifying concat dimension. 0=batches,1=height,2=width,3=depth
 		1-N: Input data tensors (quint8, d32)
 		N+1-2N: minima
 		2N+1-3N: maxima
+		3N+1: output min (optional)
+		3N+2: output max (optional)
 	3 outputs:
 		0: Output data (quint8,d32)
 		1: Output min
@@ -849,13 +856,15 @@ QuantizedMul_8x8to32:
 
 
 QuantizedMul_8x8to8
-	6 inputs:
+	6..8 inputs:
 		0: Input A data (qint8)
 		1: Input B data (qint8)
 		2: Input A min
 		3: Input A max
 		4: Input B min
 		5: Input B max
+        6: Output min (float scalar) optional
+        7: Output max (float scalar) optional
 	3 outputs:
 		0: Output data (quint8)
 		1: Output min
@@ -864,13 +873,15 @@ QuantizedMul_8x8to8
      Supports all broadcast modes.
 
 QuantizedMul_8x8to8_d32
-	6 inputs:
+	6..8 inputs:
 		0: Input A data (qint8)
 		1: Input B data (qint8)
 		2: Input A min
 		3: Input A max
 		4: Input B min
 		5: Input B max
+        6: Output min (float scalar) optional
+        7: Output max (float scalar) optional
 	3 outputs:
 		0: Output data (quint8)
 		1: Output min
@@ -1536,7 +1547,6 @@ QuantizedPad_8:
         2: Input max (float scalar)
         3: Padding (int32 tensor)
         4: Pad value (float scalar) optional default 0.0
-        5: Supplied value (int32 tensor) optional
     3 outputs:
         0: Output data (quint8 tensor)
         1: Output min (float scalar)
@@ -2212,6 +2222,29 @@ CastUInt8ToInt32:
         0: Output data (int32 tensor)
     Assumes that the data in the input tensor is of type uint8 and casts it to int32.
 
+Quantized_CastUInt8ToInt8:
+    3 inputs:
+        0: Input data (quint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    3 outputs:
+        0: Output data (qint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Assumes that the data in the input tensor is of type quint8 and casts it to qint8.
+
+
+Quantized_CastInt8ToUInt8:
+    3 inputs:
+        0: Input data (qint8 tensor)
+        1: Input min (float scalar)
+        2: Input max (float scalar)
+    3 outputs:
+        0: Output data (quint8 tensor)
+        1: Output min (float scalar)
+        2: Output max (float scalar)
+    Assumes that the data in the input tensor is of type qint8 and casts it to quint8.
+
 AxisShuffle_8:
     5 inputs:
         0: Input data (quint8 tensor)
@@ -2274,12 +2307,13 @@ ArgMax_ftoInt32:
     Returns the indices of the maximum values along an axis.
 
 ResizeNearestNeighbor_8:
-    4..5 inputs:
+    4..6 inputs:
         0: Input data (quint8 tensor)
         1: New Dimension (int32 tensor)
         2: Input min (float scalar)
         3: Input max (float scalar)
         4: Align_corners (int32 tensor) (optional) Default: False
+        5: Half_pixel_centers (int32 tensor) (optional) Default: False
     3 outputs:
         0: Output data (quint8 tensor)
         1: Output min (float scalar)
@@ -3113,3 +3147,47 @@ QuantizedChannelShuffle_8:
     Given an input tensor and an integer value of num_groups, CHANNEL_SHUFFLE divide the channel 
     dimension into num_groups groups, and reorganize the channels by grouping channels with the 
     same index in each group.
+
+QuantizedHardSwish_8:
+    3..5 inputs:
+        0: input data (quint8 tensor)
+        1: input min (float scalar)
+        2: input max (float scalar)
+        3: output min (float scalar) optional
+        4: output max (float scalar) optional
+    3 outputs:
+        0: output data (quint8 tensor)
+        1: output min (float scalar)
+        2: output max (float scalar)
+    Implementation of HARD SWISH activition function: h-swish = x * relu6(x+3) / 6
+
+QuantizedLayerNorm_i16:
+    12 inputs:
+        0: input data (qint16 tensor)
+        1: input min (float scalar)
+        2: input max (float scalar)
+        3: scale data (qint16 tensor)
+        4: scale min (float scalar)
+        5: scale max (float scalar)
+        6: bias data (qint32 tensor)
+        7: bias min (float scalar)
+        8: bias max (float scalar)
+        9: output min (float scalar)
+        10: output max (float scalar)
+        11: reduction axis (int32 scalar)
+    3 outputs:
+        0: output data (qint16 tensor)
+        1: output min (float scalar)
+        2: output max (float scalar)
+    Implementation of the Layer Normalization function. This operation
+    first computes a mean and variance along the reduction axis. Then for 
+    each element in the reduction axis it computes:
+        y = scale * (input - mean(input))/stddev(input) + bias
+    The following assumptions are made (and required):
+        scale and bias are on a per element basis
+        Thus they are required to have 1 element for every element
+        in a reduction
+    We compute the size of a reduction as follows:
+        num_reductions = product(input_dims[0:reduction axis]) (inclusive)
+        reduction size = product(input_dims[reduction axis : ]) (exclusive)
+

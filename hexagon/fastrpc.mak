@@ -51,6 +51,7 @@ HEXAGON_NN_ASM_SRCS += hexagon/asm_src/gvconv2dbbbs1x4_d32_h_v66.S \
 	hexagon/asm_src/gvconv2db2b2b2_d32_h_v66.S
 endif
 
+CC_FLAGS += -DNO_PREEMPTION=1
 
 # Use -O0 temporarily when trying to debug C code.
 #_OPT = -O0

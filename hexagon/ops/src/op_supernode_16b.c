@@ -1,6 +1,6 @@
 
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -2746,7 +2746,7 @@ static int supernode_recalculate_strategy(struct nn_node *self, struct nn_graph 
 	info->filt_height = filt_height;
 
 	if (fill_info_minmax_basics(nn, self, info) != 0)
-		return -1;
+		return errlog(nn, "error in fill_info_minmax_basics() ");
 	//fill_info_dim_basics(nn,self,info);
 
 	/*
@@ -4429,7 +4429,7 @@ static int shortin_supernode_execute_everything(struct nn_graph *nn, void *vself
 	logmsg(nn, 2, "scratch=%p input_base=%p next_in_width=%d in_height=%d required_w_before=%d", in, info->input_base, next_in_width, info->in_height, required_w_before);
 
 	// find input range, output scaling & range
-	if (fill_info_minmax_basics(nn, self, info) != 0) return -1;
+	if (fill_info_minmax_basics(nn, self, info) != 0) return errlog(nn, " error in fill_info_minmax_basics() ");
 
 	float min_out_prod_offset;
 	min_out_prod_offset = -info->out_minval / info->prod_level_size;

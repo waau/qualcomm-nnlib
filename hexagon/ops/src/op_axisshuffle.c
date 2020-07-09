@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted (subject to the limitations in the
@@ -264,6 +264,7 @@ struct nn_node_ops nn_ops_for_AxisShuffle_8 = {
     .dtor = node_free_common_release_opaque,
     .n_inputs = NN_IOCOUNT(OP_AXISSHUFFLE_Q_INPUT_NUM),
     .n_outputs = NN_IOCOUNT(OP_AXISSHUFFLE_Q_OUTPUT_NUM),
+    .flags = NN_NODE_FLAG_CLS_AXISSHUFF8,
 };
 // this does 16 and u16; the data type will be copied from the input.
 struct nn_node_ops nn_ops_for_AxisShuffle_16 = {
